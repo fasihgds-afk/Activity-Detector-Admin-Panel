@@ -27,6 +27,9 @@ import {
 } from "@mui/icons-material";
 import axios from "axios";
 
+// 🔧 Base API URL (set REACT_APP_API_URL in Netlify; falls back to local dev)
+const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
+
 // -------------------------
 // Group by Shift
 // -------------------------
@@ -71,7 +74,7 @@ function EmployeeRow({ emp, config }) {
     Official: "#3b82f6",
     General: "#f59e0b",
     Namaz: "#10b981",
-    AutoBreak: "#ef4444", // 🔹 Red for AutoBreak
+    AutoBreak: "#ef4444",
     Uncategorized: "#9ca3af",
     ...(config?.categoryColors || {}),
   };
@@ -294,7 +297,7 @@ export default function Employees() {
 
   const fetchEmployees = () => {
     axios
-      .get("http://localhost:3000/employees")
+      .get(`${API}/employees`, { timeout: 15000 })
       .then((res) => {
         setEmployees(Array.isArray(res.data) ? res.data : res.data.employees || []);
       })
@@ -303,7 +306,7 @@ export default function Employees() {
 
   const fetchConfig = () => {
     axios
-      .get("http://localhost:3000/config")
+      .get(`${API}/config`, { timeout: 15000 })
       .then((res) => setConfig(res.data))
       .catch((err) => console.error("Error fetching config:", err));
   };

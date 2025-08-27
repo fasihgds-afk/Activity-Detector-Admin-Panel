@@ -5,6 +5,9 @@ import {
 } from "@mui/material";
 import axios from "axios";
 
+// 🔧 Base API URL (set REACT_APP_API_URL in Netlify; falls back for local dev)
+const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
+
 // 🔹 Utility: calculate total idle time
 function calcIdleSummary(idleSessions) {
   if (!idleSessions || idleSessions.length === 0) return 0;
@@ -14,16 +17,20 @@ function calcIdleSummary(idleSessions) {
 export default function EmployeeTable() {
   const [employees, setEmployees] = useState([]);
 
-  const fetchEmployees = () => {
-    axios.get("http://localhost:3000/employees")
-      .then(res => setEmployees(res.data))
-      .catch(err => console.error(err));
+  const fetchEmployees = async () => {
+    try {
+      const res = await axios.get(`${API}/employees`, { timeout: 15000 });
+      // backend returns { employees, settings }
+      setEmployees(res.data?.employees || []);
+    } catch (err) {
+      console.error("Failed to fetch employees:", err);
+    }
   };
 
   useEffect(() => {
     fetchEmployees();
     // 🔄 Auto refresh every 1 minute
-    const interval = setInterval(fetchEmployees, 60000);
+    const interval = setInterval(fetchEmployees, 60_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -42,7 +49,6 @@ export default function EmployeeTable() {
         <TableBody>
           {employees.map(emp => {
             const totalIdle = calcIdleSummary(emp.idle_sessions);
-
             return (
               <TableRow key={emp.id}>
                 <TableCell>{emp.name}</TableCell>

@@ -34,7 +34,14 @@ import { DatePicker } from "@mui/x-date-pickers/DatePicker";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import dayjs from "dayjs";
+import isBetween from "dayjs/plugin/isBetween";
 import axios from "axios";
+
+// 🔧 Base API URL (set REACT_APP_API_URL in Netlify; falls back to local dev)
+const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
+
+// enable isBetween() for date filtering
+dayjs.extend(isBetween);
 
 export default function Dashboard() {
   const [employees, setEmployees] = useState([]);
@@ -57,7 +64,8 @@ export default function Dashboard() {
   // Fetch employees
   const fetchStats = async () => {
     try {
-      const res = await axios.get("http://localhost:3000/employees");
+      const res = await axios.get(`${API}/employees`, { timeout: 15000 });
+      // backend returns { employees, settings }
       const employeesData = Array.isArray(res.data)
         ? res.data
         : res.data.employees || [];
@@ -94,7 +102,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchStats();
-    const interval = setInterval(fetchStats, 60000);
+    const interval = setInterval(fetchStats, 60_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -149,7 +157,8 @@ export default function Dashboard() {
 
     employees.forEach((emp) => {
       (emp.idle_sessions || []).forEach((s) => {
-        const sessionDate = dayjs(s.start_time);
+        // use idle_start from backend (ISO string); fall back to start_time_local if needed
+        const sessionDate = s.idle_start ? dayjs(s.idle_start) : dayjs(s.start_time_local, "HH:mm:ss");
 
         if (!sessionDate.isBetween(start, end, "day", "[]")) return;
 
@@ -166,7 +175,7 @@ export default function Dashboard() {
           s.category,
           s.start_time_local || "-",
           s.end_time_local || "-",
-          `${s.duration} min`,
+          `${s.duration ?? 0} min`,
           general > 60 ? `${general} ⚠️ ${exceeded}` : general,
           namaz,
           official,
@@ -343,10 +352,7 @@ export default function Dashboard() {
               label
             >
               {getChartData().map((entry, index) => (
-                <Cell
-                  key={index}
-                  fill={COLORS[index % COLORS.length]}
-                />
+                <Cell key={index} fill={COLORS[index % COLORS.length]} />
               ))}
             </Pie>
             <Tooltip />
