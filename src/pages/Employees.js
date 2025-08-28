@@ -12,21 +12,64 @@ import autoTable from "jspdf-autotable";
 // -------- base API
 const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
 
-// -------- helpers
+// -------- small helpers (no deps)
+
+// yyyy-mm-dd for today (browser local)
 const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
 const todayStr = () => {
   const d = new Date();
-  const y = d.getFullYear(), m = d.getMonth() + 1, dd = d.getDate();
-  return `${y}-${pad(m)}-${pad(dd)}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
-// filter sessions by shiftDate against single day or date range
-function inPickedRange(shiftDate, mode, day, from, to) {
-  if (!shiftDate) return false;
-  if (mode === "day") return shiftDate === day;
-  // range
+// get Karachi date "YYYY-MM-DD"
+function khiYmd(date) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Karachi",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+// get Karachi hour 0..23
+function khiHour(date) {
+  const h = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Karachi",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).format(date);
+  return parseInt(h, 10);
+}
+// previous day of a YYYY-MM-DD string
+function prevYmd(ymd) {
+  const [y, m, d] = ymd.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() - 1);
+  return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
+}
+
+// compute the "shift day" used by your night shifts
+// rule: any timestamp with Karachi hour < 6 belongs to the previous day
+function shiftDayOfSession(session) {
+  // prefer backend-provided shiftDate if present
+  if (session.shiftDate) return session.shiftDate;
+
+  // otherwise compute from ISO start time (idle_start / break_start etc.)
+  const iso = session.idle_start || session.break_start || session.start || session.timestamp;
+  if (!iso) return null;
+
+  const d = new Date(iso);
+  const ymd = khiYmd(d);
+  const h = khiHour(d);
+  return h < 6 ? prevYmd(ymd) : ymd;
+}
+
+// filter by day/range using the computed "shift day"
+function sessionInPickedRange(session, mode, day, from, to) {
+  const sd = shiftDayOfSession(session);
+  if (!sd) return false;
+  if (mode === "day") return sd === day;
   if (!from || !to) return true;
-  return shiftDate >= from && shiftDate <= to;
+  return sd >= from && sd <= to;
 }
 
 function calcTotals(sessions) {
@@ -45,18 +88,26 @@ function calcTotals(sessions) {
 //— build a colorful XLS (HTML table) with no extra deps
 function downloadXls(filename, headers, rows) {
   const headerHtml = headers
-    .map(h => `<th style="background:#6366F1;color:#fff;padding:8px;border:1px solid #e5e7eb;text-align:center">${h}</th>`)
+    .map(
+      (h) =>
+        `<th style="background:#6366F1;color:#fff;padding:8px;border:1px solid #e5e7eb;text-align:center">${h}</th>`
+    )
     .join("");
 
-  const rowHtml = rows.map(r =>
-    `<tr>${r.map((c,i) => {
-      const base = "padding:6px;border:1px solid #e5e7eb;text-align:center";
-      let bg = "";
-      if (i === 7) bg = "background:#FEF3C7;";          // AutoBreak col light amber
-      if (i === 8 || i === 9) bg = "background:#FEE2E2;";// exceed cols light red
-      return `<td style="${base};${bg}">${String(c)}</td>`;
-    }).join("")}</tr>`
-  ).join("");
+  const rowHtml = rows
+    .map(
+      (r) =>
+        `<tr>${r
+          .map((c, i) => {
+            const base = "padding:6px;border:1px solid #e5e7eb;text-align:center";
+            let bg = "";
+            if (i === 7) bg = "background:#FEF3C7;"; // AutoBreak col light amber
+            if (i === 8 || i === 9) bg = "background:#FEE2E2;"; // exceed cols light red
+            return `<td style="${base};${bg}">${String(c)}</td>`;
+          })
+          .join("")}</tr>`
+    )
+    .join("");
 
   const html = `
     <html><head><meta charset="utf-8" />
@@ -82,16 +133,16 @@ function downloadXls(filename, headers, rows) {
 // -------------------------
 function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLimit }) {
   const [open, setOpen] = useState(false);
-
-  // merge all sessions (idle + potential autoBreaks already merged by backend)
   const all = Array.isArray(emp.idle_sessions) ? emp.idle_sessions : [];
 
-  // group by shiftDate, but **show the employee’s own shift label**
+  // group by computed shift day, but show the employee’s own shift label
   const grouped = useMemo(() => {
     const map = {};
     for (const s of all) {
-      if (!inPickedRange(s.shiftDate, dayMode, pickedDay, from, to)) continue;
-      const label = `${s.shiftDate} — ${emp.shift_start} – ${emp.shift_end}`;
+      if (!sessionInPickedRange(s, dayMode, pickedDay, from, to)) continue;
+
+      const sd = shiftDayOfSession(s); // "YYYY-MM-DD" (night-shift aware)
+      const label = `${sd} — ${emp.shift_start} – ${emp.shift_end}`;
       if (!map[label]) map[label] = [];
       map[label].push(s);
     }
@@ -133,7 +184,7 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
         </TableCell>
         <TableCell align="center">
           <Tooltip title="Show Sessions">
-            <IconButton onClick={() => setOpen(x => !x)}>
+            <IconButton onClick={() => setOpen((x) => !x)}>
               {open ? <KeyboardArrowUp /> : <KeyboardArrowDown />}
             </IconButton>
           </Tooltip>
@@ -160,7 +211,14 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
                       <Typography
                         variant="subtitle1"
                         fontWeight={700}
-                        sx={{ mb: 2, color: "#fff", bgcolor: "#6366F1", p: 1, borderRadius: 2, display: "inline-block" }}
+                        sx={{
+                          mb: 2,
+                          color: "#fff",
+                          bgcolor: "#6366F1",
+                          p: 1,
+                          borderRadius: 2,
+                          display: "inline-block",
+                        }}
                       >
                         {key}
                       </Typography>
@@ -186,10 +244,15 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
                                     fontWeight: 600,
                                     color: "#fff",
                                     bgcolor:
-                                      s.category === "Official" ? "#3b82f6" :
-                                      s.category === "General"  ? "#f59e0b" :
-                                      s.category === "Namaz"    ? "#10b981" :
-                                      s.category === "AutoBreak"? "#ef4444" : "#9ca3af"
+                                      s.category === "Official"
+                                        ? "#3b82f6"
+                                        : s.category === "General"
+                                        ? "#f59e0b"
+                                        : s.category === "Namaz"
+                                        ? "#10b981"
+                                        : s.category === "AutoBreak"
+                                        ? "#ef4444"
+                                        : "#9ca3af",
                                   }}
                                 />
                               </TableCell>
@@ -206,41 +269,58 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
                         <Grid container spacing={2}>
                           <Grid item xs={12} md={3}>
                             <Card sx={{ p: 2, borderRadius: 3, bgcolor: "#fff7ed" }}>
-                              <Typography fontWeight={700} color="warning.main">Total Time</Typography>
-                              <Typography variant="h6" fontWeight={800}>{sums.total} min</Typography>
+                              <Typography fontWeight={700} color="warning.main">
+                                Total Time
+                              </Typography>
+                              <Typography variant="h6" fontWeight={800}>
+                                {sums.total} min
+                              </Typography>
                             </Card>
                           </Grid>
                           <Grid item xs={12} md={3}>
                             <Card sx={{ p: 2, borderRadius: 3, bgcolor: "#eff6ff" }}>
-                              <Typography fontWeight={700} color="primary.main">Official Break Time</Typography>
-                              <Typography variant="h6" fontWeight={800}>{sums.official} min</Typography>
+                              <Typography fontWeight={700} color="primary.main">
+                                Official Break Time
+                              </Typography>
+                              <Typography variant="h6" fontWeight={800}>
+                                {sums.official} min
+                              </Typography>
                             </Card>
                           </Grid>
                           <Grid item xs={12} md={3}>
                             <Card sx={{ p: 2, borderRadius: 3, bgcolor: "#ecfdf5" }}>
-                              <Typography fontWeight={700} color="success.main">Namaz Break Time</Typography>
+                              <Typography fontWeight={700} color="success.main">
+                                Namaz Break Time
+                              </Typography>
                               <Typography variant="h6" fontWeight={800}>
-                                {sums.namaz} min {sums.namaz > namazLimit ? ` (Exceeded by ${sums.namaz - namazLimit})` : ""}
+                                {sums.namaz} min{" "}
+                                {sums.namaz > namazLimit ? ` (Exceeded by ${sums.namaz - namazLimit})` : ""}
                               </Typography>
                             </Card>
                           </Grid>
                           <Grid item xs={12} md={3}>
                             <Card
                               sx={{
-                                p: 2, borderRadius: 3,
-                                bgcolor: sums.general > generalLimit ? "#fecaca" : "#e9ffe9"
+                                p: 2,
+                                borderRadius: 3,
+                                bgcolor: sums.general > generalLimit ? "#fecaca" : "#e9ffe9",
                               }}
                             >
                               <Typography fontWeight={700}>General Break Time</Typography>
                               <Typography variant="h6" fontWeight={800}>
-                                {sums.general} min {sums.general > generalLimit ? ` (Exceeded by ${sums.general - generalLimit})` : ""}
+                                {sums.general} min{" "}
+                                {sums.general > generalLimit ? ` (Exceeded by ${sums.general - generalLimit})` : ""}
                               </Typography>
                             </Card>
                           </Grid>
                           <Grid item xs={12} md={3}>
                             <Card sx={{ p: 2, borderRadius: 3, bgcolor: "#fee2e2" }}>
-                              <Typography fontWeight={700} color="error.main">AutoBreak Time</Typography>
-                              <Typography variant="h6" fontWeight={800}>{sums.autobreak} min</Typography>
+                              <Typography fontWeight={700} color="error.main">
+                                AutoBreak Time
+                              </Typography>
+                              <Typography variant="h6" fontWeight={800}>
+                                {sums.autobreak} min
+                              </Typography>
                             </Card>
                           </Grid>
                         </Grid>
@@ -282,7 +362,7 @@ export default function Employees() {
       const arr = Array.isArray(res.data) ? res.data : res.data.employees || [];
       setEmployees(arr);
       if (res.data?.settings?.general_idle_limit) {
-        setConfig(c => ({ ...c, generalIdleLimit: res.data.settings.general_idle_limit }));
+        setConfig((c) => ({ ...c, generalIdleLimit: res.data.settings.general_idle_limit }));
       }
     } catch (e) {
       console.error("Error fetching employees:", e);
@@ -292,9 +372,9 @@ export default function Employees() {
   const fetchConfig = async () => {
     try {
       const res = await axios.get(`${API}/config`, { timeout: 15000 });
-      setConfig(c => ({ ...c, ...(res.data || {}) }));
-    } catch (e) {
-      // ignore
+      setConfig((c) => ({ ...c, ...(res.data || {}) }));
+    } catch {
+      /* ignore */
     }
   };
 
@@ -305,28 +385,27 @@ export default function Employees() {
     return () => clearInterval(interval);
   }, []);
 
-  // filtered employees by name + employee filter
+  // filtered employees
   const filtered = useMemo(() => {
     let list = Array.isArray(employees) ? employees : [];
-    if (employeeFilter !== "all") list = list.filter(e => e._id === employeeFilter || e.id === employeeFilter);
+    if (employeeFilter !== "all") list = list.filter((e) => e._id === employeeFilter || e.id === employeeFilter);
     if (search.trim()) {
       const s = search.toLowerCase();
-      list = list.filter(e => e.name?.toLowerCase().includes(s));
+      list = list.filter((e) => e.name?.toLowerCase().includes(s));
     }
     return list;
   }, [employees, employeeFilter, search]);
 
-  // ------- report data (for the picked day/range)
+  // ------- report rows use shift-day aware filtering
   function collectReportRows() {
     const rows = [];
-    const elist = filtered.length ? filtered : [];
-    for (const emp of elist) {
-      const sessions = (emp.idle_sessions || []).filter(s =>
-        inPickedRange(s.shiftDate, mode, day, from, to)
+    for (const emp of filtered) {
+      const sessions = (emp.idle_sessions || []).filter((s) =>
+        sessionInPickedRange(s, mode, day, from, to)
       );
       const sums = calcTotals(sessions);
       const genEx = Math.max(0, sums.general - (config.generalIdleLimit || 60));
-      const namEx = Math.max(0, sums.namaz - (config.namazLimit || 50)); // default 50 if not in /config
+      const namEx = Math.max(0, sums.namaz - (config.namazLimit || 50));
       rows.push([
         emp.emp_id || emp.id || emp._id,
         emp.name || "-",
@@ -345,18 +424,29 @@ export default function Employees() {
 
   function downloadCSV() {
     const headers = [
-      "Employee ID","Name","Department","Total Idle (min)",
-      "General (min)","Namaz (min)","Official (min)","AutoBreak (min)",
-      "General Limit (60) Exceeded (min)","Namaz Limit (50) Exceeded (min)"
+      "Employee ID",
+      "Name",
+      "Department",
+      "Total Idle (min)",
+      "General (min)",
+      "Namaz (min)",
+      "Official (min)",
+      "AutoBreak (min)",
+      "General Limit (60) Exceeded (min)",
+      "Namaz Limit (50) Exceeded (min)",
     ];
     const body = collectReportRows();
-    const csv = [headers, ...body].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+    const csv = [headers, ...body]
+      .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
+      .join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     const label = mode === "day" ? day : `${from}_to_${to}`;
     a.download = `employee_idle_report_${label}.csv`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   }
 
   function downloadPDF() {
@@ -370,10 +460,25 @@ export default function Employees() {
     doc.setFontSize(10);
     doc.setTextColor("#374151");
     doc.text(`Timezone: Asia/Karachi`, 40, 58);
-    doc.text(`Limits — General: ${config.generalIdleLimit || 60} min/day, Namaz: ${config.namazLimit || 50} min/day`, 40, 73);
+    doc.text(
+      `Limits — General: ${config.generalIdleLimit || 60} min/day, Namaz: ${
+        config.namazLimit || 50
+      } min/day`,
+      40,
+      73
+    );
 
     const headers = [
-      "Emp ID","Name","Department","Total","General","Namaz","Official","AutoBreak","Gen Exceed","Namaz Exceed"
+      "Emp ID",
+      "Name",
+      "Department",
+      "Total",
+      "General",
+      "Namaz",
+      "Official",
+      "AutoBreak",
+      "Gen Exceed",
+      "Namaz Exceed",
     ];
     const body = collectReportRows();
 
@@ -382,25 +487,35 @@ export default function Employees() {
       body,
       startY: 90,
       styles: { fontSize: 9, cellPadding: 4 },
-      headStyles: { fillColor: [99,102,241], textColor: 255, halign: "center" },
-      columnStyles: { 0:{cellWidth:90},1:{cellWidth:120},2:{cellWidth:95} },
+      headStyles: { fillColor: [99, 102, 241], textColor: 255, halign: "center" },
+      columnStyles: { 0: { cellWidth: 90 }, 1: { cellWidth: 120 }, 2: { cellWidth: 95 } },
     });
 
-    doc.save(`employee_idle_report_${label}.pdf`);
+    const file = mode === "day" ? day : `${from}_${to}`;
+    doc.save(`employee_idle_report_${file}.pdf`);
   }
 
   function downloadXLS() {
     const headers = [
-      "Employee ID","Name","Department","Total Idle (min)",
-      "General (min)","Namaz (min)","Official (min)","AutoBreak (min)",
-      "General Limit (60) Exceeded (min)","Namaz Limit (50) Exceeded (min)"
+      "Employee ID",
+      "Name",
+      "Department",
+      "Total Idle (min)",
+      "General (min)",
+      "Namaz (min)",
+      "Official (min)",
+      "AutoBreak (min)",
+      "General Limit (60) Exceeded (min)",
+      "Namaz Limit (50) Exceeded (min)",
     ];
     const rows = collectReportRows();
     const label = mode === "day" ? day : `${from}_to_${to}`;
     downloadXls(`employee_idle_report_${label}.xls`, headers, rows);
   }
 
-  const limitsNote = `General limit: ${config.generalIdleLimit || 60}m/day   Namaz limit: ${config.namazLimit || 50}m/day`;
+  const limitsNote = `General limit: ${config.generalIdleLimit || 60}m/day   Namaz limit: ${
+    config.namazLimit || 50
+  }m/day`;
 
   return (
     <Box p={3}>
@@ -427,11 +542,7 @@ export default function Employees() {
           ))}
         </Select>
 
-        <Select
-          size="small"
-          value={mode}
-          onChange={(e) => setMode(e.target.value)}
-        >
+        <Select size="small" value={mode} onChange={(e) => setMode(e.target.value)}>
           <MItem value="day">TODAY / DAY</MItem>
           <MItem value="range">CUSTOM RANGE</MItem>
         </Select>
@@ -468,17 +579,34 @@ export default function Employees() {
 
         <Box flex={1} />
 
-        <Button
-          variant="contained"
-          startIcon={<Download />}
-          onClick={(e) => setAnchorEl(e.currentTarget)}
-        >
+        <Button variant="contained" startIcon={<Download />} onClick={(e) => setAnchorEl(e.currentTarget)}>
           Download Report
         </Button>
         <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
-          <MenuItem onClick={() => { setAnchorEl(null); downloadCSV(); }}>CSV</MenuItem>
-          <MenuItem onClick={() => { setAnchorEl(null); downloadPDF(); }}>PDF</MenuItem>
-          <MenuItem onClick={() => { setAnchorEl(null); downloadXLS(); }}>Excel (.xls, colored)</MenuItem>
+          <MenuItem
+            onClick={() => {
+              setAnchorEl(null);
+              downloadCSV();
+            }}
+          >
+            CSV
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
+              setAnchorEl(null);
+              downloadPDF();
+            }}
+          >
+            PDF
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
+              setAnchorEl(null);
+              downloadXLS();
+            }}
+          >
+            Excel (.xls, colored)
+          </MenuItem>
         </Menu>
       </Box>
 
