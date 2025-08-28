@@ -1,75 +1,48 @@
-import React, { useEffect, useState } from "react";
+// src/pages/Employees.js
+import React, { useEffect, useMemo, useState } from "react";
 import {
-  Paper,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableRow,
-  Typography,
-  TextField,
-  Box,
-  TableContainer,
-  Avatar,
-  Chip,
-  Collapse,
-  IconButton,
-  Card,
-  CardContent,
-  Tooltip,
-  Grid,
-  useTheme,
+  Paper, Table, TableBody, TableCell, TableHead, TableRow,
+  Typography, TextField, Box, TableContainer, Avatar, Chip,
+  Collapse, IconButton, Card, CardContent, Tooltip, Grid,
+  useTheme, Button, Menu, MenuItem, Select, FormControl, InputLabel,
+  ToggleButtonGroup, ToggleButton, Divider
 } from "@mui/material";
-import {
-  KeyboardArrowDown,
-  KeyboardArrowUp,
-  AccessTime,
-} from "@mui/icons-material";
+import { KeyboardArrowDown, KeyboardArrowUp, AccessTime, Download } from "@mui/icons-material";
+
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { DatePicker } from "@mui/x-date-pickers/DatePicker";
+
+import dayjs from "dayjs";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import axios from "axios";
 
-// 🔧 Base API URL (set REACT_APP_API_URL in Netlify; falls back to local dev)
+// ====== CONFIG ======
 const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
+const ZONE_LABEL = "Asia/Karachi"; // purely cosmetic in this file
+const GENERAL_LIMIT_MIN = 60;
+const NAMAZ_LIMIT_MIN = 50;
 
-// -------------------------
-// Group by Shift
-// -------------------------
-function groupByShift(sessions) {
+// ====== GROUPING & RENDERING ======
+function groupByShift(sessions, emp) {
+  const label = `${emp.shift_start} – ${emp.shift_end}`;
   const groups = {};
-  sessions.forEach((s) => {
-    const key = `${s.shiftDate} — ${s.shiftLabel}`;
+  (sessions || []).forEach((s) => {
+    const key = `${s.shiftDate} — ${label}`;
     if (!groups[key]) groups[key] = [];
     groups[key].push(s);
   });
   return groups;
 }
 
-// -------------------------
-// Employee Row Component
-// -------------------------
-function EmployeeRow({ emp, config }) {
+function EmployeeRow({ emp, sessions, config }) {
   const [open, setOpen] = useState(false);
   const theme = useTheme();
+  const grouped = useMemo(() => groupByShift(sessions, emp), [sessions, emp]);
 
-  // 🔹 Merge idle + auto breaks into one array
-  const allSessions = [
-    ...(emp.idle_sessions || []),
-    ...(emp.auto_breaks || []).map((ab) => ({
-      category: "AutoBreak",
-      reason: "System Power Off / Startup",
-      start_time_local: ab.break_start_local,
-      end_time_local: ab.break_end_local,
-      duration: ab.duration_minutes,
-      shiftDate: ab.shiftDate,
-      shiftLabel: ab.shiftLabel,
-    })),
-  ];
+  const generalLimit = config?.generalIdleLimit ?? GENERAL_LIMIT_MIN;
 
-  // 🔹 Group ALL sessions by shift
-  const groupedSessions = groupByShift(allSessions);
-
-  const generalLimit = config?.generalIdleLimit || 60;
-
-  // --- Category colors
   const categoryColors = {
     Official: "#3b82f6",
     General: "#f59e0b",
@@ -79,15 +52,11 @@ function EmployeeRow({ emp, config }) {
     ...(config?.categoryColors || {}),
   };
 
-  // --- Card styles
   const cardStyle = (bgLight, textColor) => ({
     p: 2,
     borderRadius: 3,
     bgcolor: theme.palette.mode === "dark" ? "background.paper" : bgLight,
-    color:
-      theme.palette.mode === "dark"
-        ? theme.palette.text.primary
-        : textColor,
+    color: theme.palette.mode === "dark" ? theme.palette.text.primary : textColor,
   });
 
   return (
@@ -96,9 +65,14 @@ function EmployeeRow({ emp, config }) {
         <TableCell>
           <Box display="flex" alignItems="center" gap={2}>
             <Avatar sx={{ bgcolor: "#6366F1", fontWeight: 600 }}>
-              {emp.name.charAt(0)}
+              {emp.name?.charAt(0) || "?"}
             </Avatar>
-            <Typography fontWeight={600}>{emp.name}</Typography>
+            <Box>
+              <Typography fontWeight={600}>{emp.name}</Typography>
+              <Typography variant="caption" color="text.secondary">
+                ID: {emp.id}
+              </Typography>
+            </Box>
           </Box>
         </TableCell>
         <TableCell>{emp.department}</TableCell>
@@ -127,25 +101,24 @@ function EmployeeRow({ emp, config }) {
         </TableCell>
       </TableRow>
 
-      {/* Expanded Details */}
       <TableRow>
         <TableCell colSpan={5} sx={{ p: 0, bgcolor: theme.palette.background.default }}>
           <Collapse in={open} timeout="auto" unmountOnExit>
             <Box m={2}>
-              {/* Idle + AutoBreak Sessions */}
               <Typography variant="h6" gutterBottom sx={{ fontWeight: 700 }}>
                 Idle Sessions & AutoBreaks
               </Typography>
-              {Object.keys(groupedSessions).length > 0 ? (
-                Object.entries(groupedSessions).map(([shiftKey, sessions]) => {
-                  // Totals
-                  const shiftTotals = sessions.reduce(
+
+              {Object.keys(grouped).length > 0 ? (
+                Object.entries(grouped).map(([shiftKey, list]) => {
+                  const totals = list.reduce(
                     (acc, s) => {
-                      acc.total += Number(s.duration) || 0;
-                      if (s.category === "Official") acc.official += Number(s.duration) || 0;
-                      if (s.category === "General") acc.general += Number(s.duration) || 0;
-                      if (s.category === "Namaz") acc.namaz += Number(s.duration) || 0;
-                      if (s.category === "AutoBreak") acc.autobreak += Number(s.duration) || 0;
+                      const d = Number(s.duration) || 0;
+                      acc.total += d;
+                      if (s.category === "Official") acc.official += d;
+                      if (s.category === "General") acc.general += d;
+                      if (s.category === "Namaz") acc.namaz += d;
+                      if (s.category === "AutoBreak") acc.autobreak += d;
                       return acc;
                     },
                     { total: 0, official: 0, general: 0, namaz: 0, autobreak: 0 }
@@ -158,12 +131,8 @@ function EmployeeRow({ emp, config }) {
                           variant="subtitle1"
                           fontWeight={700}
                           sx={{
-                            mb: 2,
-                            color: "#fff",
-                            bgcolor: "#6366F1",
-                            p: 1,
-                            borderRadius: 2,
-                            display: "inline-block",
+                            mb: 2, color: "#fff", bgcolor: "#6366F1",
+                            p: 1, borderRadius: 2, display: "inline-block",
                           }}
                         >
                           {shiftKey}
@@ -180,7 +149,7 @@ function EmployeeRow({ emp, config }) {
                             </TableRow>
                           </TableHead>
                           <TableBody>
-                            {sessions.map((s, idx) => {
+                            {list.map((s, idx) => {
                               const color = categoryColors[s.category] || categoryColors.Uncategorized;
                               return (
                                 <TableRow key={idx}>
@@ -188,11 +157,7 @@ function EmployeeRow({ emp, config }) {
                                     <Chip
                                       label={s.category || "Uncategorized"}
                                       size="small"
-                                      sx={{
-                                        fontWeight: 600,
-                                        color: "#fff",
-                                        bgcolor: color,
-                                      }}
+                                      sx={{ fontWeight: 600, color: "#fff", bgcolor: color }}
                                     />
                                   </TableCell>
                                   <TableCell>{s.start_time_local || "N/A"}</TableCell>
@@ -205,69 +170,48 @@ function EmployeeRow({ emp, config }) {
                           </TableBody>
                         </Table>
 
-                        {/* Totals */}
                         <Box mt={2}>
                           <Grid container spacing={2}>
                             <Grid item xs={12} md={3}>
                               <Card sx={cardStyle("#fff7ed", "warning.main")}>
-                                <Typography fontWeight={700} color="warning.main">
-                                  Total Time
-                                </Typography>
-                                <Typography variant="h6" fontWeight={800}>
-                                  {shiftTotals.total} min
-                                </Typography>
+                                <Typography fontWeight={700} color="warning.main">Total Time</Typography>
+                                <Typography variant="h6" fontWeight={800}>{totals.total} min</Typography>
                               </Card>
                             </Grid>
                             <Grid item xs={12} md={3}>
                               <Card sx={cardStyle("#eff6ff", "primary.main")}>
-                                <Typography fontWeight={700} color="primary.main">
-                                  Official Break Time
-                                </Typography>
-                                <Typography variant="h6" fontWeight={800}>
-                                  {shiftTotals.official} min
-                                </Typography>
+                                <Typography fontWeight={700} color="primary.main">Official Break Time</Typography>
+                                <Typography variant="h6" fontWeight={800}>{totals.official} min</Typography>
                               </Card>
                             </Grid>
                             <Grid item xs={12} md={3}>
                               <Card sx={cardStyle("#ecfdf5", "success.main")}>
-                                <Typography fontWeight={700} color="success.main">
-                                  Namaz Break Time
-                                </Typography>
-                                <Typography variant="h6" fontWeight={800}>
-                                  {shiftTotals.namaz} min
-                                </Typography>
+                                <Typography fontWeight={700} color="success.main">Namaz Break Time</Typography>
+                                <Typography variant="h6" fontWeight={800}>{totals.namaz} min</Typography>
                               </Card>
                             </Grid>
                             <Grid item xs={12} md={3}>
                               <Card
                                 sx={{
-                                  p: 2,
-                                  borderRadius: 3,
-                                  bgcolor:
-                                    shiftTotals.general > generalLimit
-                                      ? theme.palette.error.light
-                                      : theme.palette.success.light,
+                                  p: 2, borderRadius: 3,
+                                  bgcolor: totals.general > generalLimit
+                                    ? theme.palette.error.light
+                                    : theme.palette.success.light,
                                   color: theme.palette.getContrastText(
-                                    shiftTotals.general > generalLimit
+                                    totals.general > generalLimit
                                       ? theme.palette.error.light
                                       : theme.palette.success.light
                                   ),
                                 }}
                               >
                                 <Typography fontWeight={700}>General Break Time</Typography>
-                                <Typography variant="h6" fontWeight={800}>
-                                  {shiftTotals.general} min
-                                </Typography>
+                                <Typography variant="h6" fontWeight={800}>{totals.general} min</Typography>
                               </Card>
                             </Grid>
                             <Grid item xs={12} md={3}>
                               <Card sx={cardStyle("#fee2e2", "error.main")}>
-                                <Typography fontWeight={700} color="error.main">
-                                  AutoBreak Time
-                                </Typography>
-                                <Typography variant="h6" fontWeight={800}>
-                                  {shiftTotals.autobreak} min
-                                </Typography>
+                                <Typography fontWeight={700} color="error.main">AutoBreak Time</Typography>
+                                <Typography variant="h6" fontWeight={800}>{totals.autobreak} min</Typography>
                               </Card>
                             </Grid>
                           </Grid>
@@ -277,7 +221,7 @@ function EmployeeRow({ emp, config }) {
                   );
                 })
               ) : (
-                <Typography>No sessions found</Typography>
+                <Typography>No sessions found for selected date range</Typography>
               )}
             </Box>
           </Collapse>
@@ -287,20 +231,29 @@ function EmployeeRow({ emp, config }) {
   );
 }
 
-// -------------------------
-// Main Component
-// -------------------------
+// ====== MAIN SCREEN ======
 export default function Employees() {
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
   const [config, setConfig] = useState({});
+  const [selectedEmp, setSelectedEmp] = useState("all");
 
+  // date mode & range
+  const [mode, setMode] = useState("day"); // 'day' | 'month' | 'custom'
+  const [dayDate, setDayDate] = useState(dayjs());
+  const [monthDate, setMonthDate] = useState(dayjs());
+  const [customStart, setCustomStart] = useState(dayjs().startOf("day"));
+  const [customEnd, setCustomEnd] = useState(dayjs().endOf("day"));
+
+  // download menu
+  const [anchorEl, setAnchorEl] = useState(null);
+  const menuOpen = Boolean(anchorEl);
+
+  // Fetch data
   const fetchEmployees = () => {
     axios
       .get(`${API}/employees`, { timeout: 15000 })
-      .then((res) => {
-        setEmployees(Array.isArray(res.data) ? res.data : res.data.employees || []);
-      })
+      .then((res) => setEmployees(Array.isArray(res.data) ? res.data : res.data.employees || []))
       .catch((err) => console.error("Error fetching employees:", err));
   };
 
@@ -318,50 +271,308 @@ export default function Employees() {
     return () => clearInterval(interval);
   }, []);
 
-  const filtered = Array.isArray(employees)
-    ? employees.filter((emp) =>
-        emp.name?.toLowerCase().includes(search.toLowerCase())
-      )
-    : [];
+  // Compute active date range
+  const activeRange = useMemo(() => {
+    if (mode === "day") {
+      const start = dayDate.startOf("day");
+      const end = dayDate.endOf("day");
+      return [start, end];
+    }
+    if (mode === "month") {
+      const start = monthDate.startOf("month");
+      const end = monthDate.endOf("month");
+      return [start, end];
+    }
+    // custom
+    return [customStart.startOf("day"), customEnd.endOf("day")];
+  }, [mode, dayDate, monthDate, customStart, customEnd]);
 
+  // Helpers
+  const inRange = (iso) => {
+    if (!iso) return false;
+    const t = dayjs(iso).valueOf();
+    return t >= activeRange[0].valueOf() && t <= activeRange[1].valueOf();
+    // (comparisons in local time are fine because both sides are unix ms)
+  };
+
+  const filteredBySearchAndPick = useMemo(() => {
+    const pool = Array.isArray(employees) ? employees : [];
+    const withPick = selectedEmp === "all" ? pool : pool.filter((e) => e.id === selectedEmp);
+    return withPick.filter((emp) =>
+      emp.name?.toLowerCase().includes(search.toLowerCase())
+    );
+  }, [employees, search, selectedEmp]);
+
+  // Build sessions filtered by date range
+  const sessionsForEmp = (emp) => (emp.idle_sessions || []).filter((s) => inRange(s.idle_start));
+
+  // ====== REPORT GENERATION ======
+  const computeTotals = (emp, list) => {
+    const sums = list.reduce(
+      (acc, s) => {
+        const d = Number(s.duration) || 0;
+        acc.total += d;
+        if (s.category === "General") acc.general += d;
+        if (s.category === "Namaz") acc.namaz += d;
+        if (s.category === "Official") acc.official += d;
+        if (s.category === "AutoBreak") acc.autobreak += d;
+        return acc;
+      },
+      { total: 0, general: 0, namaz: 0, official: 0, autobreak: 0 }
+    );
+    return {
+      id: emp.id,
+      name: emp.name,
+      department: emp.department,
+      ...sums,
+      exceedGeneral: Math.max(0, sums.general - GENERAL_LIMIT_MIN),
+      exceedNamaz: Math.max(0, sums.namaz - NAMAZ_LIMIT_MIN),
+    };
+  };
+
+  const buildReportRows = () => {
+    const rows = filteredBySearchAndPick.map((emp) => {
+      const list = sessionsForEmp(emp);
+      return computeTotals(emp, list);
+    });
+    return rows;
+  };
+
+  const rangeLabel = useMemo(() => {
+    const [s, e] = activeRange;
+    const fmt = (d) => d.format("YYYY-MM-DD");
+    if (mode === "day") return fmt(s);
+    if (mode === "month") return s.format("YYYY-MM");
+    return `${fmt(s)} → ${fmt(e)}`;
+  }, [activeRange, mode]);
+
+  // CSV
+  const downloadCSV = () => {
+    const rows = buildReportRows();
+    const headers = [
+      "Employee ID",
+      "Name",
+      "Department",
+      "Total Idle (min)",
+      "General (min)",
+      "Namaz (min)",
+      "Official (min)",
+      "AutoBreak (min)",
+      "General Limit (60) Exceeded (min)",
+      "Namaz Limit (50) Exceeded (min)",
+    ];
+    const body = rows.map((r) => [
+      r.id,
+      r.name,
+      r.department,
+      r.total,
+      r.general,
+      r.namaz,
+      r.official,
+      r.autobreak,
+      r.exceedGeneral,
+      r.exceedNamaz,
+    ]);
+
+    const csv = [headers, ...body].map((arr) => arr.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `employee_report_${rangeLabel}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  // PDF
+  const downloadPDF = () => {
+    const rows = buildReportRows();
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+
+    doc.setFontSize(14);
+    doc.text(`Employee Idle Report (${rangeLabel})`, 40, 40);
+    doc.setFontSize(10);
+    doc.text(`Timezone: ${ZONE_LABEL}`, 40, 58);
+    doc.text(
+      `Limits — General: ${GENERAL_LIMIT_MIN} min/day, Namaz: ${NAMAZ_LIMIT_MIN} min/day`,
+      40, 72
+    );
+
+    const head = [[
+      "Emp ID", "Name", "Department",
+      "Total", "General", "Namaz", "Official", "AutoBreak",
+      "Gen Exceed", "Namaz Exceed"
+    ]];
+
+    const body = rows.map((r) => [
+      r.id, r.name, r.department,
+      r.total, r.general, r.namaz, r.official, r.autobreak,
+      r.exceedGeneral ? `${r.exceedGeneral}` : "0",
+      r.exceedNamaz ? `${r.exceedNamaz}` : "0",
+    ]);
+
+    autoTable(doc, {
+      startY: 90,
+      head,
+      body,
+      styles: { fontSize: 9 },
+      headStyles: { fillColor: [99, 102, 241] }, // indigo
+    });
+
+    doc.save(`employee_report_${rangeLabel}.pdf`);
+  };
+
+  // ====== RENDER ======
   return (
-    <Box p={4}>
-      <Typography variant="h4" fontWeight={700} gutterBottom>
-        Employees
-      </Typography>
-      <Typography variant="body2" color="text.secondary" gutterBottom>
-        Manage employee details, idle sessions & auto breaks grouped by shift
-      </Typography>
+    <LocalizationProvider dateAdapter={AdapterDayjs}>
+      <Box p={4}>
+        <Box display="flex" alignItems="center" justifyContent="space-between" mb={2}>
+          <Box>
+            <Typography variant="h4" fontWeight={700}>Employees</Typography>
+            <Typography variant="body2" color="text.secondary">
+              View sessions and download daily / monthly / custom reports
+            </Typography>
+          </Box>
 
-      <TextField
-        placeholder="🔍 Search Employee..."
-        variant="outlined"
-        fullWidth
-        sx={{ mb: 3, bgcolor: "background.paper", borderRadius: 2 }}
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-      />
+          <Box>
+            <Button
+              variant="contained"
+              startIcon={<Download />}
+              onClick={(e) => setAnchorEl(e.currentTarget)}
+            >
+              Download Report
+            </Button>
+            <Menu anchorEl={anchorEl} open={menuOpen} onClose={() => setAnchorEl(null)}>
+              <MenuItem onClick={() => { setAnchorEl(null); downloadCSV(); }}>CSV</MenuItem>
+              <MenuItem onClick={() => { setAnchorEl(null); downloadPDF(); }}>PDF</MenuItem>
+            </Menu>
+          </Box>
+        </Box>
 
-      <TableContainer component={Paper} elevation={5} sx={{ borderRadius: "20px" }}>
-        <Table>
-          <TableHead>
-            <TableRow sx={{ background: "linear-gradient(90deg,#6366F1,#14B8A6)" }}>
-              <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Name</TableCell>
-              <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Department</TableCell>
-              <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Shift</TableCell>
-              <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Status</TableCell>
-              <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="center">
-                Sessions
-              </TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {filtered.map((emp) => (
-              <EmployeeRow key={emp.id} emp={emp} config={config} />
-            ))}
-          </TableBody>
-        </Table>
-      </TableContainer>
-    </Box>
+        {/* Controls */}
+        <Card sx={{ p: 2, mb: 3 }}>
+          <Grid container spacing={2} alignItems="center">
+            <Grid item xs={12} md={3}>
+              <TextField
+                placeholder="🔍 Search Employee..."
+                variant="outlined"
+                fullWidth
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </Grid>
+
+            <Grid item xs={12} md={3}>
+              <FormControl fullWidth>
+                <InputLabel>Employee</InputLabel>
+                <Select
+                  label="Employee"
+                  value={selectedEmp}
+                  onChange={(e) => setSelectedEmp(e.target.value)}
+                >
+                  <MenuItem value="all">All Employees</MenuItem>
+                  {employees.map((e) => (
+                    <MenuItem key={e.id} value={e.id}>
+                      {e.name} — {e.department}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+
+            <Grid item xs={12} md={6}>
+              <Box display="flex" gap={2} alignItems="center" flexWrap="wrap">
+                <ToggleButtonGroup
+                  value={mode}
+                  exclusive
+                  onChange={(_, val) => val && setMode(val)}
+                  size="small"
+                >
+                  <ToggleButton value="day">Today / Day</ToggleButton>
+                  <ToggleButton value="month">This Month</ToggleButton>
+                  <ToggleButton value="custom">Custom</ToggleButton>
+                </ToggleButtonGroup>
+
+                {mode === "day" && (
+                  <DatePicker
+                    label="Pick a day"
+                    value={dayDate}
+                    onChange={(v) => v && setDayDate(v)}
+                  />
+                )}
+
+                {mode === "month" && (
+                  <DatePicker
+                    label="Pick a month"
+                    views={["year", "month"]}
+                    value={monthDate}
+                    onChange={(v) => v && setMonthDate(v)}
+                  />
+                )}
+
+                {mode === "custom" && (
+                  <>
+                    <DatePicker
+                      label="Start date"
+                      value={customStart}
+                      onChange={(v) => v && setCustomStart(v)}
+                    />
+                    <DatePicker
+                      label="End date"
+                      value={customEnd}
+                      onChange={(v) => v && setCustomEnd(v)}
+                    />
+                  </>
+                )}
+              </Box>
+            </Grid>
+          </Grid>
+
+          <Divider sx={{ mt: 2 }} />
+          <Box mt={2} display="flex" alignItems="center" gap={2} flexWrap="wrap">
+            <Chip
+              color="info"
+              label={`Range: ${
+                mode === "day"
+                  ? activeRange[0].format("YYYY-MM-DD")
+                  : mode === "month"
+                  ? activeRange[0].format("YYYY-MM")
+                  : `${activeRange[0].format("YYYY-MM-DD")} → ${activeRange[1].format("YYYY-MM-DD")}`
+              }`}
+            />
+            <Chip label={`General limit: ${GENERAL_LIMIT_MIN} min/day`} />
+            <Chip label={`Namaz limit: ${NAMAZ_LIMIT_MIN} min/day`} />
+          </Box>
+        </Card>
+
+        {/* Employees table */}
+        <TableContainer component={Paper} elevation={5} sx={{ borderRadius: "20px" }}>
+          <Table>
+            <TableHead>
+              <TableRow sx={{ background: "linear-gradient(90deg,#6366F1,#14B8A6)" }}>
+                <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Name</TableCell>
+                <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Department</TableCell>
+                <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Shift</TableCell>
+                <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Status</TableCell>
+                <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="center">
+                  Sessions
+                </TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {filteredBySearchAndPick.map((emp) => (
+                <EmployeeRow
+                  key={emp.id}
+                  emp={emp}
+                  sessions={sessionsForEmp(emp)}
+                  config={config}
+                />
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </Box>
+    </LocalizationProvider>
   );
 }
