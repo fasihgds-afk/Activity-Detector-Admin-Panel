@@ -2,74 +2,56 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   Paper, Table, TableBody, TableCell, TableHead, TableRow, Typography,
   TextField, Box, TableContainer, Avatar, Chip, Collapse, IconButton,
-  Card, CardContent, Tooltip, Grid, Button, Menu, MenuItem, Select, MenuItem as MItem
+  Card, CardContent, Tooltip, Grid, Button, Menu, MenuItem, Select
 } from "@mui/material";
 import { KeyboardArrowDown, KeyboardArrowUp, AccessTime, Download } from "@mui/icons-material";
 import axios from "axios";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
-// -------- base API
+/* =========================
+   Base API (set REACT_APP_API_URL on Vercel)
+   ========================= */
 const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
 
-// -------- small helpers (no deps)
-
-// yyyy-mm-dd for today (browser local)
+/* =========================
+   Helpers
+   ========================= */
 const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
-const todayStr = () => {
-  const d = new Date();
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-};
 
-// get Karachi date "YYYY-MM-DD"
-function khiYmd(date) {
-  return new Intl.DateTimeFormat("en-CA", {
+// shift “today” (Asia/Karachi). Before 06:00 → use yesterday.
+function currentShiftYmd() {
+  const fmtYmd = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Karachi",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).format(date);
-}
-// get Karachi hour 0..23
-function khiHour(date) {
-  const h = new Intl.DateTimeFormat("en-US", {
+  });
+  const hourFmt = new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Karachi",
     hour: "2-digit",
     hourCycle: "h23",
-  }).format(date);
-  return parseInt(h, 10);
-}
-// previous day of a YYYY-MM-DD string
-function prevYmd(ymd) {
+  });
+
+  const now = new Date();
+  const ymd = fmtYmd.format(now);       // YYYY-MM-DD
+  const hour = parseInt(hourFmt.format(now), 10);
+
+  if (hour >= 6) return ymd;
+
+  // go to previous day in Asia/Karachi (without bringing a big tz lib)
   const [y, m, d] = ymd.split("-").map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
   dt.setUTCDate(dt.getUTCDate() - 1);
   return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
 }
 
-// compute the "shift day" used by your night shifts
-// rule: any timestamp with Karachi hour < 6 belongs to the previous day
-function shiftDayOfSession(session) {
-  // prefer backend-provided shiftDate if present
-  if (session.shiftDate) return session.shiftDate;
-
-  // otherwise compute from ISO start time (idle_start / break_start etc.)
-  const iso = session.idle_start || session.break_start || session.start || session.timestamp;
-  if (!iso) return null;
-
-  const d = new Date(iso);
-  const ymd = khiYmd(d);
-  const h = khiHour(d);
-  return h < 6 ? prevYmd(ymd) : ymd;
-}
-
-// filter by day/range using the computed "shift day"
-function sessionInPickedRange(session, mode, day, from, to) {
-  const sd = shiftDayOfSession(session);
-  if (!sd) return false;
-  if (mode === "day") return sd === day;
+// filter sessions by s.shiftDate against a single day or date range
+function inPickedRange(shiftDate, mode, day, from, to) {
+  if (!shiftDate) return false;
+  if (mode === "day") return shiftDate === day;
   if (!from || !to) return true;
-  return sd >= from && sd <= to;
+  return shiftDate >= from && shiftDate <= to;
 }
 
 function calcTotals(sessions) {
@@ -85,7 +67,7 @@ function calcTotals(sessions) {
   return t;
 }
 
-//— build a colorful XLS (HTML table) with no extra deps
+// Build a colorful XLS (HTML table) with no extra deps (CSV cannot be colored).
 function downloadXls(filename, headers, rows) {
   const headerHtml = headers
     .map(
@@ -101,8 +83,8 @@ function downloadXls(filename, headers, rows) {
           .map((c, i) => {
             const base = "padding:6px;border:1px solid #e5e7eb;text-align:center";
             let bg = "";
-            if (i === 7) bg = "background:#FEF3C7;"; // AutoBreak col light amber
-            if (i === 8 || i === 9) bg = "background:#FEE2E2;"; // exceed cols light red
+            if (i === 7) bg = "background:#FEF3C7;"; // AutoBreak column (light amber)
+            if (i === 8 || i === 9) bg = "background:#FEE2E2;"; // exceed columns (light red)
             return `<td style="${base};${bg}">${String(c)}</td>`;
           })
           .join("")}</tr>`
@@ -111,7 +93,10 @@ function downloadXls(filename, headers, rows) {
 
   const html = `
     <html><head><meta charset="utf-8" />
-    <style>table{border-collapse:collapse;font-family:Segoe UI,Arial;font-size:12px}</style>
+    <style>
+      table{border-collapse:collapse;font-family:Segoe UI,Arial;font-size:12px}
+      thead tr th{position:sticky;top:0}
+    </style>
     </head><body>
       <table>
         <thead><tr>${headerHtml}</tr></thead>
@@ -128,21 +113,20 @@ function downloadXls(filename, headers, rows) {
   document.body.removeChild(a);
 }
 
-// -------------------------
-// Employee Row
-// -------------------------
+/* =========================
+   Row Component
+   ========================= */
 function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLimit }) {
   const [open, setOpen] = useState(false);
+
   const all = Array.isArray(emp.idle_sessions) ? emp.idle_sessions : [];
 
-  // group by computed shift day, but show the employee’s own shift label
+  // Group by shiftDate, but show employee’s own shift times (6PM–3AM or 9PM–6AM)
   const grouped = useMemo(() => {
     const map = {};
     for (const s of all) {
-      if (!sessionInPickedRange(s, dayMode, pickedDay, from, to)) continue;
-
-      const sd = shiftDayOfSession(s); // "YYYY-MM-DD" (night-shift aware)
-      const label = `${sd} — ${emp.shift_start} – ${emp.shift_end}`;
+      if (!inPickedRange(s.shiftDate, dayMode, pickedDay, from, to)) continue;
+      const label = `${s.shiftDate} — ${emp.shift_start} – ${emp.shift_end}`;
       if (!map[label]) map[label] = [];
       map[label].push(s);
     }
@@ -160,12 +144,12 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
             <Box>
               <Typography fontWeight={700}>{emp.name}</Typography>
               <Typography variant="caption" color="text.secondary">
-                ID: {emp.emp_id || emp.id}
+                ID: {emp.emp_id || emp.id || emp._id}
               </Typography>
             </Box>
           </Box>
         </TableCell>
-        <TableCell>{emp.department}</TableCell>
+        <TableCell>{emp.department || "-"}</TableCell>
         <TableCell>
           <Chip
             icon={<AccessTime />}
@@ -293,8 +277,7 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
                                 Namaz Break Time
                               </Typography>
                               <Typography variant="h6" fontWeight={800}>
-                                {sums.namaz} min{" "}
-                                {sums.namaz > namazLimit ? ` (Exceeded by ${sums.namaz - namazLimit})` : ""}
+                                {sums.namaz} min
                               </Typography>
                             </Card>
                           </Grid>
@@ -309,7 +292,9 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
                               <Typography fontWeight={700}>General Break Time</Typography>
                               <Typography variant="h6" fontWeight={800}>
                                 {sums.general} min{" "}
-                                {sums.general > generalLimit ? ` (Exceeded by ${sums.general - generalLimit})` : ""}
+                                {sums.general > generalLimit
+                                  ? `(Exceeded by ${sums.general - generalLimit})`
+                                  : ""}
                               </Typography>
                             </Card>
                           </Grid>
@@ -337,22 +322,25 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
   );
 }
 
-// -------------------------
-// Main Component
-// -------------------------
+/* =========================
+   Main Screen
+   ========================= */
 export default function Employees() {
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
-  const [config, setConfig] = useState({ generalIdleLimit: 60 });
+  const [config, setConfig] = useState({ generalIdleLimit: 60, namazLimit: 50 });
   const [employeeFilter, setEmployeeFilter] = useState("all");
 
-  // date controls (no extra libs)
+  // date controls
   const [mode, setMode] = useState("day"); // 'day' | 'range'
-  const [day, setDay] = useState(todayStr());
-  const [from, setFrom] = useState(todayStr());
-  const [to, setTo] = useState(todayStr());
+  const [day, setDay] = useState(currentShiftYmd());
+  const [from, setFrom] = useState(currentShiftYmd());
+  const [to, setTo] = useState(currentShiftYmd());
 
-  // menu for downloads
+  // auto-advance day at 06:00 unless user changed it manually
+  const [autoShiftDay, setAutoShiftDay] = useState(true);
+
+  // download menu
   const [anchorEl, setAnchorEl] = useState(null);
   const openMenu = Boolean(anchorEl);
 
@@ -385,10 +373,26 @@ export default function Employees() {
     return () => clearInterval(interval);
   }, []);
 
-  // filtered employees
+  // auto-update the "day" at 06:00 Asia/Karachi
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (mode !== "day" || !autoShiftDay) return;
+      const sd = currentShiftYmd();
+      setDay((d) => (d !== sd ? sd : d));
+    }, 60_000);
+    return () => clearInterval(t);
+  }, [mode, autoShiftDay]);
+
   const filtered = useMemo(() => {
     let list = Array.isArray(employees) ? employees : [];
-    if (employeeFilter !== "all") list = list.filter((e) => e._id === employeeFilter || e.id === employeeFilter);
+    if (employeeFilter !== "all") {
+      list = list.filter(
+        (e) =>
+          e.emp_id === employeeFilter ||
+          e.id === employeeFilter ||
+          e._id === employeeFilter
+      );
+    }
     if (search.trim()) {
       const s = search.toLowerCase();
       list = list.filter((e) => e.name?.toLowerCase().includes(s));
@@ -396,16 +400,17 @@ export default function Employees() {
     return list;
   }, [employees, employeeFilter, search]);
 
-  // ------- report rows use shift-day aware filtering
+  // ------- report data for current filter & date(s)
   function collectReportRows() {
     const rows = [];
-    for (const emp of filtered) {
+    const elist = filtered.length ? filtered : [];
+    for (const emp of elist) {
       const sessions = (emp.idle_sessions || []).filter((s) =>
-        sessionInPickedRange(s, mode, day, from, to)
+        inPickedRange(s.shiftDate, mode, day, from, to)
       );
       const sums = calcTotals(sessions);
-      const genEx = Math.max(0, sums.general - (config.generalIdleLimit || 60));
-      const namEx = Math.max(0, sums.namaz - (config.namazLimit || 50));
+      const genEx = Math.max(0, sums.general - (config.generalIdleLimit ?? 60));
+      const namEx = Math.max(0, sums.namaz - (config.namazLimit ?? 50));
       rows.push([
         emp.emp_id || emp.id || emp._id,
         emp.name || "-",
@@ -461,9 +466,7 @@ export default function Employees() {
     doc.setTextColor("#374151");
     doc.text(`Timezone: Asia/Karachi`, 40, 58);
     doc.text(
-      `Limits — General: ${config.generalIdleLimit || 60} min/day, Namaz: ${
-        config.namazLimit || 50
-      } min/day`,
+      `Limits — General: ${config.generalIdleLimit ?? 60} min/day, Namaz: ${config.namazLimit ?? 50} min/day`,
       40,
       73
     );
@@ -491,8 +494,7 @@ export default function Employees() {
       columnStyles: { 0: { cellWidth: 90 }, 1: { cellWidth: 120 }, 2: { cellWidth: 95 } },
     });
 
-    const file = mode === "day" ? day : `${from}_${to}`;
-    doc.save(`employee_idle_report_${file}.pdf`);
+    doc.save(`employee_idle_report_${label}.pdf`);
   }
 
   function downloadXLS() {
@@ -513,12 +515,13 @@ export default function Employees() {
     downloadXls(`employee_idle_report_${label}.xls`, headers, rows);
   }
 
-  const limitsNote = `General limit: ${config.generalIdleLimit || 60}m/day   Namaz limit: ${
-    config.namazLimit || 50
+  const limitsNote = `General limit: ${config.generalIdleLimit ?? 60}m/day   Namaz limit: ${
+    config.namazLimit ?? 50
   }m/day`;
 
   return (
     <Box p={3}>
+      {/* Controls */}
       <Box display="flex" alignItems="center" flexWrap="wrap" gap={2} mb={1}>
         <TextField
           placeholder="🔍 Search Employees…"
@@ -534,17 +537,17 @@ export default function Employees() {
           onChange={(e) => setEmployeeFilter(e.target.value)}
           sx={{ minWidth: 200 }}
         >
-          <MItem value="all">All Employees</MItem>
+          <MenuItem value="all">All Employees</MenuItem>
           {employees.map((e) => (
-            <MItem key={e.id || e._id} value={e.id || e._id}>
+            <MenuItem key={e.emp_id || e.id || e._id} value={e.emp_id || e.id || e._id}>
               {e.name}
-            </MItem>
+            </MenuItem>
           ))}
         </Select>
 
         <Select size="small" value={mode} onChange={(e) => setMode(e.target.value)}>
-          <MItem value="day">TODAY / DAY</MItem>
-          <MItem value="range">CUSTOM RANGE</MItem>
+          <MenuItem value="day">TODAY / DAY</MenuItem>
+          <MenuItem value="range">CUSTOM RANGE</MenuItem>
         </Select>
 
         {mode === "day" ? (
@@ -553,7 +556,10 @@ export default function Employees() {
             type="date"
             size="small"
             value={day}
-            onChange={(e) => setDay(e.target.value)}
+            onChange={(e) => {
+              setAutoShiftDay(false);
+              setDay(e.target.value);
+            }}
             InputLabelProps={{ shrink: true }}
           />
         ) : (
@@ -611,9 +617,11 @@ export default function Employees() {
       </Box>
 
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
-        Range: {mode === "day" ? day : `${from} → ${to}`} &nbsp; | &nbsp; {limitsNote}
+        Range: {mode === "day" ? day : `${from} → ${to}`} &nbsp; | &nbsp; {limitsNote} &nbsp; | &nbsp; TZ:
+        Asia/Karachi
       </Typography>
 
+      {/* Table */}
       <TableContainer component={Paper} elevation={5} sx={{ borderRadius: "18px" }}>
         <Table>
           <TableHead>
@@ -630,14 +638,14 @@ export default function Employees() {
           <TableBody>
             {filtered.map((emp) => (
               <EmployeeRow
-                key={emp.id || emp._id}
+                key={emp.emp_id || emp.id || emp._id}
                 emp={emp}
                 dayMode={mode}
                 pickedDay={day}
                 from={from}
                 to={to}
-                generalLimit={config.generalIdleLimit || 60}
-                namazLimit={config.namazLimit || 50}
+                generalLimit={config.generalIdleLimit ?? 60}
+                namazLimit={config.namazLimit ?? 50}
               />
             ))}
           </TableBody>
