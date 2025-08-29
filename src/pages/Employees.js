@@ -9,17 +9,28 @@ import axios from "axios";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
-/* =========================
-   Base API (set REACT_APP_API_URL on Vercel)
-   ========================= */
 const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
 
-/* =========================
-   Helpers
-   ========================= */
+/* -------- helpers -------- */
 const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
 
-// shift “today” (Asia/Karachi). Before 06:00 → use yesterday.
+function ymdInAsiaFromISO(iso) {
+  if (!iso) return null;
+  try {
+    const d = new Date(iso);
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Karachi",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    return fmt.format(d); // YYYY-MM-DD
+  } catch {
+    return null;
+  }
+}
+
+// before 06:00 local → use previous day as “shift business day”
 function currentShiftYmd() {
   const fmtYmd = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Karachi",
@@ -34,24 +45,25 @@ function currentShiftYmd() {
   });
 
   const now = new Date();
-  const ymd = fmtYmd.format(now);       // YYYY-MM-DD
+  const ymd = fmtYmd.format(now);
   const hour = parseInt(hourFmt.format(now), 10);
-
   if (hour >= 6) return ymd;
 
-  // go to previous day in Asia/Karachi (without bringing a big tz lib)
   const [y, m, d] = ymd.split("-").map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
   dt.setUTCDate(dt.getUTCDate() - 1);
   return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
 }
 
-// filter sessions by s.shiftDate against a single day or date range
-function inPickedRange(shiftDate, mode, day, from, to) {
-  if (!shiftDate) return false;
-  if (mode === "day") return shiftDate === day;
+// filter using shiftDate if present; else fall back to ISO start converted to Asia/Karachi
+function inPickedRange(shiftDate, mode, day, from, to, idleStartISO) {
+  let sd = shiftDate;
+  if (!sd) sd = ymdInAsiaFromISO(idleStartISO);
+  if (!sd) return false;
+
+  if (mode === "day") return sd === day;
   if (!from || !to) return true;
-  return shiftDate >= from && shiftDate <= to;
+  return sd >= from && sd <= to;
 }
 
 function calcTotals(sessions) {
@@ -59,21 +71,18 @@ function calcTotals(sessions) {
   for (const s of sessions) {
     const d = Number(s.duration) || 0;
     t.total += d;
-    if (s.category === "General") t.general += d;
-    else if (s.category === "Namaz") t.namaz += d;
+    if (s.category === "General")  t.general  += d;
+    else if (s.category === "Namaz")    t.namaz    += d;
     else if (s.category === "Official") t.official += d;
     else if (s.category === "AutoBreak") t.autobreak += d;
   }
   return t;
 }
 
-// Build a colorful XLS (HTML table) with no extra deps (CSV cannot be colored).
+/* -------- XLS maker -------- */
 function downloadXls(filename, headers, rows) {
   const headerHtml = headers
-    .map(
-      (h) =>
-        `<th style="background:#6366F1;color:#fff;padding:8px;border:1px solid #e5e7eb;text-align:center">${h}</th>`
-    )
+    .map((h) => `<th style="background:#6366F1;color:#fff;padding:8px;border:1px solid #e5e7eb;text-align:center">${h}</th>`)
     .join("");
 
   const rowHtml = rows
@@ -83,8 +92,8 @@ function downloadXls(filename, headers, rows) {
           .map((c, i) => {
             const base = "padding:6px;border:1px solid #e5e7eb;text-align:center";
             let bg = "";
-            if (i === 7) bg = "background:#FEF3C7;"; // AutoBreak column (light amber)
-            if (i === 8 || i === 9) bg = "background:#FEE2E2;"; // exceed columns (light red)
+            if (i === 7) bg = "background:#FEF3C7;";
+            if (i === 8 || i === 9) bg = "background:#FEE2E2;";
             return `<td style="${base};${bg}">${String(c)}</td>`;
           })
           .join("")}</tr>`
@@ -121,12 +130,17 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
 
   const all = Array.isArray(emp.idle_sessions) ? emp.idle_sessions : [];
 
-  // Group by shiftDate, but show employee’s own shift times (6PM–3AM or 9PM–6AM)
   const grouped = useMemo(() => {
     const map = {};
-    for (const s of all) {
-      if (!inPickedRange(s.shiftDate, dayMode, pickedDay, from, to)) continue;
-      const label = `${s.shiftDate} — ${emp.shift_start} – ${emp.shift_end}`;
+    const sorted = [...all].sort((a, b) => {
+      const at = a.idle_start ? new Date(a.idle_start).getTime() : 0;
+      const bt = b.idle_start ? new Date(b.idle_start).getTime() : 0;
+      return at - bt;
+    });
+
+    for (const s of sorted) {
+      if (!inPickedRange(s.shiftDate, dayMode, pickedDay, from, to, s.idle_start)) continue;
+      const label = `${s.shiftDate || ymdInAsiaFromISO(s.idle_start) || "Unknown"} — ${emp.shift_start} – ${emp.shift_end}`;
       if (!map[label]) map[label] = [];
       map[label].push(s);
     }
@@ -228,22 +242,22 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
                                     fontWeight: 600,
                                     color: "#fff",
                                     bgcolor:
-                                      s.category === "Official"
-                                        ? "#3b82f6"
-                                        : s.category === "General"
-                                        ? "#f59e0b"
-                                        : s.category === "Namaz"
-                                        ? "#10b981"
-                                        : s.category === "AutoBreak"
-                                        ? "#ef4444"
-                                        : "#9ca3af",
+                                      s.category === "Official"   ? "#3b82f6" :
+                                      s.category === "General"    ? "#f59e0b" :
+                                      s.category === "Namaz"      ? "#10b981" :
+                                      s.category === "AutoBreak"  ? "#ef4444" :
+                                                                    "#9ca3af",
                                   }}
                                 />
                               </TableCell>
                               <TableCell>{s.start_time_local || "-"}</TableCell>
                               <TableCell>{s.end_time_local || "Ongoing"}</TableCell>
                               <TableCell>{s.reason || "-"}</TableCell>
-                              <TableCell>{s.duration ?? 0} min</TableCell>
+                              <TableCell>
+                                {s.category === "AutoBreak"
+                                  ? `${Number(s.duration ?? 0).toFixed(1)} min`
+                                  : `${s.duration ?? 0} min`}
+                              </TableCell>
                             </TableRow>
                           ))}
                         </TableBody>
@@ -257,7 +271,7 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
                                 Total Time
                               </Typography>
                               <Typography variant="h6" fontWeight={800}>
-                                {sums.total} min
+                                {Number(sums.total).toFixed(1)} min
                               </Typography>
                             </Card>
                           </Grid>
@@ -304,7 +318,7 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
                                 AutoBreak Time
                               </Typography>
                               <Typography variant="h6" fontWeight={800}>
-                                {sums.autobreak} min
+                                {Number(sums.autobreak).toFixed(1)} min
                               </Typography>
                             </Card>
                           </Grid>
@@ -331,16 +345,12 @@ export default function Employees() {
   const [config, setConfig] = useState({ generalIdleLimit: 60, namazLimit: 50 });
   const [employeeFilter, setEmployeeFilter] = useState("all");
 
-  // date controls
-  const [mode, setMode] = useState("day"); // 'day' | 'range'
-  const [day, setDay] = useState(currentShiftYmd());
+  const [mode, setMode] = useState("day");
+  const [day, setDay]   = useState(currentShiftYmd());
   const [from, setFrom] = useState(currentShiftYmd());
-  const [to, setTo] = useState(currentShiftYmd());
-
-  // auto-advance day at 06:00 unless user changed it manually
+  const [to, setTo]     = useState(currentShiftYmd());
   const [autoShiftDay, setAutoShiftDay] = useState(true);
 
-  // download menu
   const [anchorEl, setAnchorEl] = useState(null);
   const openMenu = Boolean(anchorEl);
 
@@ -361,9 +371,7 @@ export default function Employees() {
     try {
       const res = await axios.get(`${API}/config`, { timeout: 15000 });
       setConfig((c) => ({ ...c, ...(res.data || {}) }));
-    } catch {
-      /* ignore */
-    }
+    } catch {}
   };
 
   useEffect(() => {
@@ -373,7 +381,6 @@ export default function Employees() {
     return () => clearInterval(interval);
   }, []);
 
-  // auto-update the "day" at 06:00 Asia/Karachi
   useEffect(() => {
     const t = setInterval(() => {
       if (mode !== "day" || !autoShiftDay) return;
@@ -400,13 +407,12 @@ export default function Employees() {
     return list;
   }, [employees, employeeFilter, search]);
 
-  // ------- report data for current filter & date(s)
   function collectReportRows() {
     const rows = [];
     const elist = filtered.length ? filtered : [];
     for (const emp of elist) {
       const sessions = (emp.idle_sessions || []).filter((s) =>
-        inPickedRange(s.shiftDate, mode, day, from, to)
+        inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start)
       );
       const sums = calcTotals(sessions);
       const genEx = Math.max(0, sums.general - (config.generalIdleLimit ?? 60));
@@ -429,21 +435,12 @@ export default function Employees() {
 
   function downloadCSV() {
     const headers = [
-      "Employee ID",
-      "Name",
-      "Department",
-      "Total Idle (min)",
-      "General (min)",
-      "Namaz (min)",
-      "Official (min)",
-      "AutoBreak (min)",
-      "General Limit (60) Exceeded (min)",
-      "Namaz Limit (50) Exceeded (min)",
+      "Employee ID","Name","Department","Total Idle (min)","General (min)",
+      "Namaz (min)","Official (min)","AutoBreak (min)",
+      "General Limit (60) Exceeded (min)","Namaz Limit (50) Exceeded (min)",
     ];
     const body = collectReportRows();
-    const csv = [headers, ...body]
-      .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
-      .join("\n");
+    const csv = [headers, ...body].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -465,24 +462,9 @@ export default function Employees() {
     doc.setFontSize(10);
     doc.setTextColor("#374151");
     doc.text(`Timezone: Asia/Karachi`, 40, 58);
-    doc.text(
-      `Limits — General: ${config.generalIdleLimit ?? 60} min/day, Namaz: ${config.namazLimit ?? 50} min/day`,
-      40,
-      73
-    );
+    doc.text(`Limits — General: ${config.generalIdleLimit ?? 60} min/day, Namaz: ${config.namazLimit ?? 50} min/day`, 40, 73);
 
-    const headers = [
-      "Emp ID",
-      "Name",
-      "Department",
-      "Total",
-      "General",
-      "Namaz",
-      "Official",
-      "AutoBreak",
-      "Gen Exceed",
-      "Namaz Exceed",
-    ];
+    const headers = ["Emp ID","Name","Department","Total","General","Namaz","Official","AutoBreak","Gen Exceed","Namaz Exceed"];
     const body = collectReportRows();
 
     autoTable(doc, {
@@ -499,25 +481,16 @@ export default function Employees() {
 
   function downloadXLS() {
     const headers = [
-      "Employee ID",
-      "Name",
-      "Department",
-      "Total Idle (min)",
-      "General (min)",
-      "Namaz (min)",
-      "Official (min)",
-      "AutoBreak (min)",
-      "General Limit (60) Exceeded (min)",
-      "Namaz Limit (50) Exceeded (min)",
+      "Employee ID","Name","Department","Total Idle (min)","General (min)",
+      "Namaz (min)","Official (min)","AutoBreak (min)",
+      "General Limit (60) Exceeded (min)","Namaz Limit (50) Exceeded (min)",
     ];
     const rows = collectReportRows();
     const label = mode === "day" ? day : `${from}_to_${to}`;
     downloadXls(`employee_idle_report_${label}.xls`, headers, rows);
   }
 
-  const limitsNote = `General limit: ${config.generalIdleLimit ?? 60}m/day   Namaz limit: ${
-    config.namazLimit ?? 50
-  }m/day`;
+  const limitsNote = `General limit: ${config.generalIdleLimit ?? 60}m/day   Namaz limit: ${config.namazLimit ?? 50}m/day`;
 
   return (
     <Box p={3}>
@@ -556,30 +529,13 @@ export default function Employees() {
             type="date"
             size="small"
             value={day}
-            onChange={(e) => {
-              setAutoShiftDay(false);
-              setDay(e.target.value);
-            }}
+            onChange={(e) => { setAutoShiftDay(false); setDay(e.target.value); }}
             InputLabelProps={{ shrink: true }}
           />
         ) : (
           <>
-            <TextField
-              label="From"
-              type="date"
-              size="small"
-              value={from}
-              onChange={(e) => setFrom(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-            />
-            <TextField
-              label="To"
-              type="date"
-              size="small"
-              value={to}
-              onChange={(e) => setTo(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-            />
+            <TextField label="From" type="date" size="small" value={from} onChange={(e) => setFrom(e.target.value)} InputLabelProps={{ shrink: true }} />
+            <TextField label="To"   type="date" size="small" value={to}   onChange={(e) => setTo(e.target.value)}   InputLabelProps={{ shrink: true }} />
           </>
         )}
 
@@ -589,36 +545,14 @@ export default function Employees() {
           Download Report
         </Button>
         <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
-          <MenuItem
-            onClick={() => {
-              setAnchorEl(null);
-              downloadCSV();
-            }}
-          >
-            CSV
-          </MenuItem>
-          <MenuItem
-            onClick={() => {
-              setAnchorEl(null);
-              downloadPDF();
-            }}
-          >
-            PDF
-          </MenuItem>
-          <MenuItem
-            onClick={() => {
-              setAnchorEl(null);
-              downloadXLS();
-            }}
-          >
-            Excel (.xls, colored)
-          </MenuItem>
+          <MenuItem onClick={() => { setAnchorEl(null); downloadCSV(); }}>CSV</MenuItem>
+          <MenuItem onClick={() => { setAnchorEl(null); downloadPDF(); }}>PDF</MenuItem>
+          <MenuItem onClick={() => { setAnchorEl(null); downloadXLS(); }}>Excel (.xls, colored)</MenuItem>
         </Menu>
       </Box>
 
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
-        Range: {mode === "day" ? day : `${from} → ${to}`} &nbsp; | &nbsp; {limitsNote} &nbsp; | &nbsp; TZ:
-        Asia/Karachi
+        Range: {mode === "day" ? day : `${from} → ${to}`} &nbsp; | &nbsp; {limitsNote} &nbsp; | &nbsp; TZ: Asia/Karachi
       </Typography>
 
       {/* Table */}
@@ -630,9 +564,7 @@ export default function Employees() {
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Department</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Shift</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Status</TableCell>
-              <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="center">
-                Sessions
-              </TableCell>
+              <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="center">Sessions</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
