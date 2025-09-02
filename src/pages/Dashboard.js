@@ -1,331 +1,403 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Grid,
-  Card,
-  CardContent,
-  Typography,
-  Box,
-  Divider,
-  Button,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  List,
-  ListItem,
-  ListItemText,
-  Select,
-  MenuItem,
+  Grid, Card, CardContent, Typography, Box, Divider, Button, Dialog,
+  DialogTitle, DialogContent, List, ListItem, ListItemText, Select, MenuItem,
+  Chip, LinearProgress, Tooltip, Alert, Skeleton, ToggleButton, ToggleButtonGroup
 } from "@mui/material";
 import {
-  PieChart,
-  Pie,
-  Cell,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
+  PieChart, Pie, Cell, Tooltip as RTooltip, Legend,
+  ResponsiveContainer, BarChart, Bar, XAxis, YAxis
 } from "recharts";
-import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
-import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
-import { DatePicker } from "@mui/x-date-pickers/DatePicker";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import dayjs from "dayjs";
-import isBetween from "dayjs/plugin/isBetween";
 import axios from "axios";
 
-// 🔧 Base API URL (set REACT_APP_API_URL in Netlify; falls back to local dev)
+/* =============================
+   CONFIG & COLORS
+   ============================= */
 const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
 
-// enable isBetween() for date filtering
-dayjs.extend(isBetween);
+// brand palette
+const COLORS = {
+  brandStart: "#6366F1",
+  brandEnd:   "#14B8A6",
+  general:    "#F97316",
+  namaz:      "#10B981",
+  official:   "#3b82f6",
+  okBg:       "#ecfdf5",
+  warnBg:     "#fffbeb",
+  badBg:      "#fee2e2",
+};
 
+const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
+
+/* ---- TZ helpers ---- */
+function ymdInAsiaFromISO(iso) {
+  if (!iso) return null;
+  try {
+    const d = new Date(iso);
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Karachi", year: "numeric", month: "2-digit", day: "2-digit",
+    });
+    return fmt.format(d); // YYYY-MM-DD
+  } catch { return null; }
+}
+// Shift business day: before 06:00 local → previous day
+function currentShiftYmd() {
+  const fmtYmd = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Karachi", year: "numeric", month: "2-digit", day: "2-digit",
+  });
+  const hourFmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Karachi", hour: "2-digit", hourCycle: "h23",
+  });
+  const now = new Date();
+  const ymd = fmtYmd.format(now);
+  const hour = parseInt(hourFmt.format(now), 10);
+  if (hour >= 6) return ymd;
+  const [y, m, d] = ymd.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() - 1);
+  return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
+}
+function firstLastOfMonth(ymd) {
+  const [y, m] = ymd.split("-").map(Number);
+  const start = `${y}-${pad(m)}-01`;
+  const days = new Date(y, m, 0).getDate();
+  const end = `${y}-${pad(m)}-${pad(days)}`;
+  return { start, end, days };
+}
+
+/* ---- XLS (Excel) ---- */
+function downloadXls(filename, headers, rows) {
+  const headerHtml = headers
+    .map((h) => `<th style="background:#111827;color:#fff;padding:10px 8px;border:1px solid #e5e7eb;text-align:center;font-weight:700">${h}</th>`)
+    .join("");
+  const rowHtml = rows
+    .map((r) => `<tr>${r.map((c) =>
+      `<td style="padding:8px;border:1px solid #e5e7eb;text-align:center">${String(c)}</td>`).join("")
+    }</tr>`).join("");
+  const html = `
+    <html><head><meta charset="utf-8" />
+    <style>table{border-collapse:collapse;font-family:Segoe UI,Arial;font-size:12px}</style>
+    </head><body><table><thead><tr>${headerHtml}</tr></thead><tbody>${rowHtml}</tbody></table></body></html>`;
+  const blob = new Blob([html], { type: "application/vnd.ms-excel" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename.endsWith(".xls") ? filename : `${filename}.xls`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+/* =============================
+   MAIN
+   ============================= */
 export default function Dashboard() {
   const [employees, setEmployees] = useState([]);
-  const [stats, setStats] = useState({
-    total: 0,
-    active: 0,
-    idle: 0,
-    logs: 0,
-    general: 0,
-    namaz: 0,
-    official: 0,
-  });
+  const [limits, setLimits] = useState({ general: 60, namaz: 50 }); // daily defaults
   const [selectedEmp, setSelectedEmp] = useState("all");
   const [openDialog, setOpenDialog] = useState(false);
-  const [dateRange, setDateRange] = useState([
-    dayjs().startOf("day"),
-    dayjs().endOf("day"),
-  ]);
+  const [scope, setScope] = useState("today"); // 'today' | 'month'
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [updatedAt, setUpdatedAt] = useState("");
+  const pollRef = useRef(null);
 
-  // Fetch employees
-  const fetchStats = async () => {
+  const todayYmd = useMemo(() => currentShiftYmd(), []);
+  const { start: monthStart, end: monthEnd, days: daysInMonth } = useMemo(
+    () => firstLastOfMonth(todayYmd), [todayYmd]
+  );
+
+  /* ---- Fetch employees + settings ---- */
+  async function fetchAll() {
     try {
+      setLoading(true);
       const res = await axios.get(`${API}/employees`, { timeout: 15000 });
-      // backend returns { employees, settings }
-      const employeesData = Array.isArray(res.data)
-        ? res.data
-        : res.data.employees || [];
+      const data = Array.isArray(res.data) ? res.data : res.data.employees || [];
+      setEmployees(data);
 
-      setEmployees(employeesData);
+      // settings from backend
+      const cfg = res.data?.settings || {};
+      const general = Number(cfg.general_idle_limit) || limits.general;
+      const namaz = Number(cfg.namazLimit) || limits.namaz;
+      setLimits({ general, namaz });
 
-      const active = employeesData.filter(
-        (e) => e.latest_status === "Active"
-      ).length;
-      const idle = employeesData.filter(
-        (e) => e.latest_status !== "Active"
-      ).length;
-      const total = employeesData.length;
-
-      let logs = 0,
-        general = 0,
-        namaz = 0,
-        official = 0;
-
-      employeesData.forEach((emp) => {
-        (emp.idle_sessions || []).forEach((s) => {
-          logs++;
-          if (s.category === "General") general += s.duration || 0;
-          if (s.category === "Namaz") namaz += s.duration || 0;
-          if (s.category === "Official") official += s.duration || 0;
-        });
-      });
-
-      setStats({ total, active, idle, logs, general, namaz, official });
-    } catch (err) {
-      console.error("Error fetching employee stats:", err);
+      setErr("");
+      setUpdatedAt(new Date().toLocaleString("en-PK", { hour12: true }));
+    } catch (e) {
+      console.error(e);
+      setErr("Could not load data. Retrying automatically…");
+    } finally {
+      setLoading(false);
     }
-  };
+  }
 
   useEffect(() => {
-    fetchStats();
-    const interval = setInterval(fetchStats, 60_000);
-    return () => clearInterval(interval);
+    fetchAll();
+    pollRef.current = setInterval(fetchAll, 60_000);
+    return () => clearInterval(pollRef.current);
   }, []);
 
-  // Chart Data
-  const getChartData = () => {
-    if (selectedEmp === "all") {
-      return [
-        { name: "General Break", value: stats.general },
-        { name: "Namaz Break", value: stats.namaz },
-        { name: "Official Break", value: stats.official },
-      ];
+  /* ---- Filters for scope ---- */
+  function sessionsInScope(sessions) {
+    const list = Array.isArray(sessions) ? sessions : [];
+    if (scope === "today") {
+      return list.filter((s) => (s.shiftDate || ymdInAsiaFromISO(s.idle_start)) === todayYmd);
     }
-
-    const emp = employees.find((e) => e.id === selectedEmp);
-    if (!emp) return [];
-
-    let general = 0,
-      namaz = 0,
-      official = 0;
-    (emp.idle_sessions || []).forEach((s) => {
-      if (s.category === "General") general += s.duration || 0;
-      if (s.category === "Namaz") namaz += s.duration || 0;
-      if (s.category === "Official") official += s.duration || 0;
+    // month
+    return list.filter((s) => {
+      const sd = s.shiftDate || ymdInAsiaFromISO(s.idle_start);
+      return sd && sd >= monthStart && sd <= monthEnd;
     });
+  }
+  const effectiveGeneralLimit = useMemo(
+    () => (scope === "month" ? limits.general * daysInMonth : limits.general),
+    [scope, limits.general, daysInMonth]
+  );
+  const effectiveNamazLimit = useMemo(
+    () => (scope === "month" ? limits.namaz * daysInMonth : limits.namaz),
+    [scope, limits.namaz, daysInMonth]
+  );
 
-    return [
-      { name: "General Break", value: general },
-      { name: "Namaz Break", value: namaz },
-      { name: "Official Break", value: official },
-    ];
-  };
+  /* ---- Aggregations ---- */
+  const totalsToday = useMemo(() => {
+    let general = 0, namaz = 0, official = 0;
+    for (const e of employees) {
+      const ses = sessionsInScope(e.idle_sessions.filter(s => (s.shiftDate || ymdInAsiaFromISO(s.idle_start)) === todayYmd));
+      for (const s of ses) {
+        const d = Number(s.duration) || 0;
+        if (s.category === "General") general += d;
+        else if (s.category === "Namaz") namaz += d;
+        else if (s.category === "Official") official += d;
+      }
+    }
+    return { general, namaz, official };
+  }, [employees, todayYmd]);
 
-  // Bar chart per employee
-  const getBarChartData = () => {
-    return employees.map((emp) => {
-      let general = 0,
-        namaz = 0,
-        official = 0;
-      (emp.idle_sessions || []).forEach((s) => {
-        if (s.category === "General") general += s.duration || 0;
-        if (s.category === "Namaz") namaz += s.duration || 0;
-        if (s.category === "Official") official += s.duration || 0;
-      });
-      return { name: emp.name, General: general, Namaz: namaz, Official: official };
-    });
-  };
-
-  // Export function (CSV or PDF with date range)
-  const exportReport = (type = "csv") => {
-    const [start, end] = dateRange;
+  // Leaderboard (based on current scope)
+  const leaderboard = useMemo(() => {
     const rows = [];
+    for (const e of employees) {
+      const ses = sessionsInScope(e.idle_sessions);
+      let general = 0, namaz = 0, official = 0;
+      for (const s of ses) {
+        const d = Number(s.duration) || 0;
+        if (s.category === "General") general += d;
+        else if (s.category === "Namaz") namaz += d;
+        else if (s.category === "Official") official += d;
+      }
+      const total = general + namaz + official;
 
-    employees.forEach((emp) => {
-      (emp.idle_sessions || []).forEach((s) => {
-        // use idle_start from backend (ISO string); fall back to start_time_local if needed
-        const sessionDate = s.idle_start ? dayjs(s.idle_start) : dayjs(s.start_time_local, "HH:mm:ss");
+      const genCap = effectiveGeneralLimit;
+      const namCap = effectiveNamazLimit;
+      const genPct = genCap ? general / genCap : 0;
+      const namPct = namCap ? namaz / namCap : 0;
 
-        if (!sessionDate.isBetween(start, end, "day", "[]")) return;
+      const genEx = Math.max(0, general - genCap);
+      const namEx = Math.max(0, namaz - namCap);
 
-        const general = s.category === "General" ? s.duration || 0 : 0;
-        const namaz = s.category === "Namaz" ? s.duration || 0 : 0;
-        const official = s.category === "Official" ? s.duration || 0 : 0;
-        const total = general + namaz + official;
+      let status = "Obedient", color = "success";
+      if (genEx > 0 || namEx > 0) { status = "Exceeded"; color = "error"; }
+      else if (genPct >= 0.8 || namPct >= 0.8) { status = "Near Limit"; color = "warning"; }
 
-        const exceeded = general > 60 ? `Exceeded by ${general - 60} min` : "";
+      // score: lower is better; exceeding hurts more
+      const score = genEx * 3 + namEx * 3 + total * 0.01;
 
-        rows.push([
-          emp.name,
-          emp.latest_status,
-          s.category,
-          s.start_time_local || "-",
-          s.end_time_local || "-",
-          `${s.duration ?? 0} min`,
-          general > 60 ? `${general} ⚠️ ${exceeded}` : general,
-          namaz,
-          official,
-          total,
-        ]);
+      rows.push({
+        id: e.id || e.emp_id || e._id,
+        name: e.name || "-",
+        department: e.department || "-",
+        latest_status: e.latest_status || "-",
+        general, namaz, official, total,
+        status, color, score
       });
+    }
+    return rows
+      .sort((a, b) => {
+        const rank = (s) => (s === "Obedient" ? 0 : s === "Near Limit" ? 1 : 2);
+        const d = rank(a.status) - rank(b.status);
+        if (d !== 0) return d;
+        return a.score - b.score;
+      })
+      .map((r, i) => ({ rank: i + 1, ...r }));
+  }, [employees, scope, effectiveGeneralLimit, effectiveNamazLimit]);
+
+  /* ---- Charts (today-only for snappy UX) ---- */
+  const donutData = useMemo(() => ([
+    { name: "General Break", value: totalsToday.general },
+    { name: "Namaz Break", value: totalsToday.namaz },
+    { name: "Official Break", value: totalsToday.official },
+  ]), [totalsToday]);
+
+  const barDataToday = useMemo(() => {
+    return employees.map((emp) => {
+      const ses = (emp.idle_sessions || []).filter(
+        (s) => (s.shiftDate || ymdInAsiaFromISO(s.idle_start)) === todayYmd
+      );
+      let g = 0, n = 0, o = 0;
+      for (const s of ses) {
+        const d = Number(s.duration) || 0;
+        if (s.category === "General") g += d;
+        else if (s.category === "Namaz") n += d;
+        else if (s.category === "Official") o += d;
+      }
+      return { name: emp.name, General: g, Namaz: n, Official: o };
+    });
+  }, [employees, todayYmd]);
+
+  /* ---- Exports (PDF / Excel) ---- */
+  function exportPDF() {
+    const label =
+      scope === "today" ? todayYmd : `${monthStart} → ${monthEnd} (${daysInMonth} days)`;
+    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
+    const pageW = doc.internal.pageSize.getWidth();
+    const gray600 = "#4b5563";
+
+    const limitsText =
+      scope === "month"
+        ? `Limits: General ${limits.general}m/day (cap ${effectiveGeneralLimit}m), Namaz ${limits.namaz}m/day (cap ${effectiveNamazLimit}m)`
+        : `Limits: General ${limits.general}m/day, Namaz ${limits.namaz}m/day`;
+
+    const header = () => {
+      doc.setFillColor(31, 41, 55);
+      doc.rect(0, 0, pageW, 64, "F");
+      doc.setFont("helvetica", "bold"); doc.setFontSize(20); doc.setTextColor("#fff");
+      doc.text("Employee Idle Leaderboard", 40, 26);
+      doc.setFont("helvetica", "normal"); doc.setFontSize(12);
+      doc.text(`Scope: ${label}  |  TZ: Asia/Karachi  |  ${limitsText}`, 40, 46);
+    };
+    const footer = (pageNumber) => {
+      doc.setFontSize(9); doc.setTextColor(gray600);
+      doc.text(`Page ${pageNumber}`, pageW / 2, doc.internal.pageSize.getHeight() - 14, { align: "center" });
+    };
+
+    const headers = ["#", "Name", "Dept", "Status", "General (m)", "Namaz (m)", "Official (m)", "Total (m)"];
+    const body = leaderboard.map((r) => [
+      r.rank, r.name, r.department, r.status, r.general, r.namaz, r.official, r.total
+    ]);
+
+    header();
+    autoTable(doc, {
+      head: [headers],
+      body,
+      margin: { left: 40, right: 40, top: 70, bottom: 28 },
+      startY: 84,
+      styles: { fontSize: 10, cellPadding: 6, halign: "center", valign: "middle" },
+      headStyles: { fillColor: [99,102,241], textColor: 255, halign: "center" },
+      theme: "striped",
+      alternateRowStyles: { fillColor: [248, 250, 252] },
+      didDrawPage: (d) => { header(); footer(d.pageNumber); },
+      didParseCell: (d) => {
+        if (d.section === "body") {
+          const row = leaderboard[d.row.index];
+          d.cell.styles.fillColor =
+            row.status === "Exceeded" ? [254, 226, 226] :
+            row.status === "Near Limit" ? [255, 251, 235] : [236, 253, 245];
+          if ([4,5,6,7].includes(d.column.index)) d.cell.styles.fontStyle = "bold";
+        }
+      },
+      columnStyles: { 1: { halign: "left" }, 2: { halign: "left" } }
     });
 
-    const headers = [
-      "Employee",
-      "Status",
-      "Category",
-      "Start Time",
-      "End Time",
-      "Duration",
-      "General",
-      "Namaz",
-      "Official",
-      "Total",
-    ];
+    const fileLabel = scope === "today" ? todayYmd : `${monthStart.replaceAll("-","")}_${monthEnd.replaceAll("-","")}`;
+    doc.save(`leaderboard_${fileLabel}.pdf`);
+  }
 
-    if (type === "csv") {
-      const csvContent = [headers, ...rows].map((e) => e.join(",")).join("\n");
-      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.setAttribute(
-        "download",
-        `employee_report_${dayjs().format("YYYY-MM-DD")}.csv`
-      );
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    }
+  function exportXLS() {
+    const headers = ["Rank","Name","Department","Status","General (m)","Namaz (m)","Official (m)","Total (m)"];
+    const rows = leaderboard.map((r) => [r.rank, r.name, r.department, r.status, r.general, r.namaz, r.official, r.total]);
+    const fileLabel = scope === "today" ? todayYmd : `${monthStart.replaceAll("-","")}_${monthEnd.replaceAll("-","")}`;
+    downloadXls(`leaderboard_${fileLabel}.xls`, headers, rows);
+  }
 
-    if (type === "pdf") {
-      const doc = new jsPDF();
-      doc.setFontSize(14);
-      doc.text(
-        `Employee Report (${dayjs(start).format("YYYY-MM-DD")} → ${dayjs(end).format("YYYY-MM-DD")})`,
-        14,
-        20
-      );
-
-      autoTable(doc, {
-        head: [headers],
-        body: rows,
-        styles: { fontSize: 9 },
-        didParseCell: (data) => {
-          if (
-            data.column.index === 6 &&
-            data.cell.raw.toString().includes("⚠️")
-          ) {
-            data.cell.styles.textColor = [255, 0, 0];
-          }
-        },
-      });
-
-      doc.save(`employee_report_${dayjs().format("YYYY-MM-DD")}.pdf`);
-    }
-  };
-
-  const COLORS = ["#F97316", "#10B981", "#3b82f6"];
+  /* =============================
+     UI
+     ============================= */
+  const skeletonCard = (
+    <Card sx={{ p: 2 }}>
+      <Skeleton variant="text" width={120} height={28} />
+      <Skeleton variant="text" width={80} height={40} />
+      <Skeleton variant="rounded" height={36} sx={{ mt: 1 }} />
+    </Card>
+  );
 
   return (
     <Box p={4}>
-      {/* Top Stats */}
+      {err && <Alert severity="warning" sx={{ mb: 2 }}>{err}</Alert>}
+
+      {/* Top stats (today) */}
       <Grid container spacing={3} sx={{ mb: 4 }}>
         <Grid item xs={12} sm={6} md={3}>
-          <Card sx={{ p: 2, bgcolor: "#6366F1", color: "#fff" }}>
-            <CardContent>
-              <Typography variant="h6">Total Employees</Typography>
-              <Typography variant="h4" fontWeight={700}>
-                {stats.total}
-              </Typography>
-              <Button
-                variant="outlined"
-                sx={{ mt: 1, color: "#fff", borderColor: "#fff" }}
-                onClick={() => setOpenDialog(true)}
-              >
-                Show All
-              </Button>
-            </CardContent>
-          </Card>
+          {loading ? skeletonCard : (
+            <Card sx={{ p: 2, background: `linear-gradient(135deg,${COLORS.brandStart},${COLORS.brandEnd})`, color: "#fff" }}>
+              <CardContent>
+                <Typography variant="h6">Total Employees</Typography>
+                <Typography variant="h4" fontWeight={700}>{employees.length}</Typography>
+                <Button variant="outlined" sx={{ mt: 1, color: "#fff", borderColor: "#fff" }} onClick={() => setOpenDialog(true)}>Show All</Button>
+              </CardContent>
+            </Card>
+          )}
         </Grid>
         <Grid item xs={12} sm={6} md={3}>
-          <Card sx={{ p: 2, bgcolor: "#10B981", color: "#fff" }}>
-            <CardContent>
-              <Typography variant="h6">Active Employees</Typography>
-              <Typography variant="h4" fontWeight={700}>
-                {stats.active}
-              </Typography>
-            </CardContent>
-          </Card>
+          {loading ? skeletonCard : (
+            <Card sx={{ p: 2, bgcolor: COLORS.namaz, color: "#fff" }}>
+              <CardContent>
+                <Typography variant="h6">Date (TZ Asia/Karachi)</Typography>
+                <Typography variant="h4" fontWeight={700}>{todayYmd}</Typography>
+              </CardContent>
+            </Card>
+          )}
         </Grid>
         <Grid item xs={12} sm={6} md={3}>
-          <Card sx={{ p: 2, bgcolor: "#F97316", color: "#fff" }}>
-            <CardContent>
-              <Typography variant="h6">Idle Employees</Typography>
-              <Typography variant="h4" fontWeight={700}>
-                {stats.idle}
-              </Typography>
-            </CardContent>
-          </Card>
+          {loading ? skeletonCard : (
+            <Card sx={{ p: 2, bgcolor: COLORS.general, color: "#fff" }}>
+              <CardContent>
+                <Typography variant="h6">General Limit</Typography>
+                <Typography variant="h4" fontWeight={700}>{limits.general} m/day</Typography>
+              </CardContent>
+            </Card>
+          )}
         </Grid>
         <Grid item xs={12} sm={6} md={3}>
-          <Card sx={{ p: 2, bgcolor: "#14B8A6", color: "#fff" }}>
-            <CardContent>
-              <Typography variant="h6">Logs Today</Typography>
-              <Typography variant="h4" fontWeight={700}>
-                {stats.logs}
-              </Typography>
-            </CardContent>
-          </Card>
+          {loading ? skeletonCard : (
+            <Card sx={{ p: 2, bgcolor: COLORS.official, color: "#fff" }}>
+              <CardContent>
+                <Typography variant="h6">Namaz Limit</Typography>
+                <Typography variant="h4" fontWeight={700}>{limits.namaz} m/day</Typography>
+              </CardContent>
+            </Card>
+          )}
         </Grid>
       </Grid>
 
-      {/* Date Pickers */}
+      {/* Export + Scope (compact & professional) */}
       <Card sx={{ p: 3, mb: 4 }}>
-        <LocalizationProvider dateAdapter={AdapterDayjs}>
-          <Box display="flex" gap={2}>
-            <DatePicker
-              label="Start Date"
-              value={dateRange[0]}
-              onChange={(newValue) => setDateRange([newValue, dateRange[1]])}
-            />
-            <DatePicker
-              label="End Date"
-              value={dateRange[1]}
-              onChange={(newValue) => setDateRange([dateRange[0], newValue])}
-            />
-          </Box>
-        </LocalizationProvider>
-        <Box display="flex" gap={2} mt={2}>
-          <Button variant="contained" onClick={() => exportReport("csv")}>
-            Export CSV
-          </Button>
-          <Button variant="outlined" onClick={() => exportReport("pdf")}>
-            Export PDF
-          </Button>
+        <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
+          <Typography variant="h6" fontWeight={600} sx={{ mr: "auto" }}>
+            Quick Exports
+            <Typography variant="caption" sx={{ ml: 1 }} color="text.secondary">
+              Last updated: {updatedAt || "—"}
+            </Typography>
+          </Typography>
+          <ToggleButtonGroup
+            value={scope}
+            exclusive
+            onChange={(_, v) => v && setScope(v)}
+            size="small"
+            sx={{ mr: 1 }}
+          >
+            <ToggleButton value="today">Today</ToggleButton>
+            <ToggleButton value="month">This Month</ToggleButton>
+          </ToggleButtonGroup>
+          <Button variant="contained" onClick={exportPDF}>Export PDF</Button>
+          <Button variant="outlined" onClick={exportXLS}>Export Excel</Button>
         </Box>
       </Card>
 
-      {/* Pie Chart */}
+      {/* Pie (today) */}
       <Card sx={{ p: 3, mb: 4 }}>
         <Box display="flex" justifyContent="space-between" alignItems="center">
-          <Typography variant="h6" fontWeight={600}>
-            Break Usage Summary
-          </Typography>
+          <Typography variant="h6" fontWeight={600}>Break Usage Summary (Today)</Typography>
           <Select
             size="small"
             value={selectedEmp}
@@ -333,7 +405,7 @@ export default function Dashboard() {
           >
             <MenuItem value="all">All Employees</MenuItem>
             {employees.map((emp) => (
-              <MenuItem key={emp.id} value={emp.id}>
+              <MenuItem key={emp.id || emp.emp_id || emp._id} value={emp.id || emp.emp_id || emp._id}>
                 {emp.name}
               </MenuItem>
             ))}
@@ -343,7 +415,24 @@ export default function Dashboard() {
         <ResponsiveContainer width="100%" height={300}>
           <PieChart>
             <Pie
-              data={getChartData()}
+              data={
+                selectedEmp === "all"
+                  ? donutData
+                  : (() => {
+                      const emp = employees.find(
+                        e => (e.id || e.emp_id || e._id) === selectedEmp
+                      );
+                      const ses = (emp?.idle_sessions || []).filter(
+                        (s) => (s.shiftDate || ymdInAsiaFromISO(s.idle_start)) === todayYmd
+                      );
+                      const agg = (c) => ses.reduce((a, s) => a + (s.category === c ? (s.duration || 0) : 0), 0);
+                      return [
+                        { name: "General Break", value: agg("General") },
+                        { name: "Namaz Break", value: agg("Namaz") },
+                        { name: "Official Break", value: agg("Official") },
+                      ];
+                    })()
+              }
               dataKey="value"
               nameKey="name"
               cx="50%"
@@ -351,110 +440,112 @@ export default function Dashboard() {
               outerRadius={120}
               label
             >
-              {getChartData().map((entry, index) => (
-                <Cell key={index} fill={COLORS[index % COLORS.length]} />
+              {[COLORS.general, COLORS.namaz, COLORS.official].map((c, i) => (
+                <Cell key={i} fill={c} />
               ))}
             </Pie>
-            <Tooltip />
+            <RTooltip />
             <Legend />
           </PieChart>
         </ResponsiveContainer>
       </Card>
 
-      {/* Bar Chart */}
+      {/* Bar (today) */}
       <Card sx={{ p: 3, mb: 4 }}>
-        <Typography variant="h6" fontWeight={600}>
-          Employee Comparison
-        </Typography>
+        <Typography variant="h6" fontWeight={600}>Employee Comparison (Today)</Typography>
         <Divider sx={{ my: 2 }} />
         <ResponsiveContainer width="100%" height={400}>
-          <BarChart
-            data={getBarChartData()}
-            margin={{ top: 20, right: 30, left: 0, bottom: 5 }}
-          >
+          <BarChart data={barDataToday} margin={{ top: 20, right: 30, left: 0, bottom: 5 }}>
             <XAxis dataKey="name" />
             <YAxis />
-            <Tooltip />
+            <RTooltip />
             <Legend />
-            <Bar dataKey="General" stackId="a" fill="#F97316" />
-            <Bar dataKey="Namaz" stackId="a" fill="#10B981" />
-            <Bar dataKey="Official" stackId="a" fill="#3b82f6" />
+            <Bar dataKey="General" stackId="a" fill={COLORS.general} />
+            <Bar dataKey="Namaz"   stackId="a" fill={COLORS.namaz} />
+            <Bar dataKey="Official" stackId="a" fill={COLORS.official} />
           </BarChart>
         </ResponsiveContainer>
       </Card>
 
-      {/* Leaderboard Table */}
+      {/* Leaderboard (scope aware) */}
       <Card sx={{ p: 3, mb: 4 }}>
-        <Typography variant="h6" fontWeight={600}>
-          Employee Leaderboard
+        <Typography variant="h6" fontWeight={700}>
+          Leaderboard — Obedience ({scope === "today" ? "Today" : `This Month (${daysInMonth} days)`})
         </Typography>
-        <Divider sx={{ my: 2 }} />
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ background: "#f3f4f6" }}>
-              <th>Name</th>
-              <th>Status</th>
-              <th>General</th>
-              <th>Namaz</th>
-              <th>Official</th>
-              <th>Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            {employees.map((emp) => {
-              let general = 0,
-                namaz = 0,
-                official = 0;
-              (emp.idle_sessions || []).forEach((s) => {
-                if (s.category === "General") general += s.duration || 0;
-                if (s.category === "Namaz") namaz += s.duration || 0;
-                if (s.category === "Official") official += s.duration || 0;
-              });
-              const total = general + namaz + official;
-              return (
-                <tr
-                  key={emp.id}
-                  style={{
-                    textAlign: "center",
-                    borderBottom: "1px solid #e5e7eb",
-                  }}
-                >
-                  <td>{emp.name}</td>
-                  <td>{emp.latest_status}</td>
-                  <td
-                    style={{
-                      color: general > 60 ? "red" : "inherit",
-                      fontWeight: general > 60 ? 700 : 400,
-                    }}
-                  >
-                    {general} min{" "}
-                    {general > 60 && `(Exceeded by ${general - 60} min)`}
-                  </td>
-                  <td>{namaz} min</td>
-                  <td>{official} min</td>
-                  <td style={{ fontWeight: 700 }}>{total} min</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Sorted with most obedient at top. Colors: <b style={{color:"#059669"}}>Green</b> = Obedient,
+          <b style={{color:"#b45309"}}> Amber</b> = Near limit,
+          <b style={{color:"#dc2626"}}> Red</b> = Exceeded.
+        </Typography>
+        <Divider sx={{ mb: 2 }} />
+        <Box sx={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: `linear-gradient(90deg,${COLORS.brandStart},${COLORS.brandEnd})`, color: "#fff" }}>
+                <th style={{ padding: 10, textAlign: "left" }}>#</th>
+                <th style={{ padding: 10, textAlign: "left" }}>Name</th>
+                <th style={{ padding: 10, textAlign: "left" }}>Dept</th>
+                <th style={{ padding: 10 }}>General</th>
+                <th style={{ padding: 10 }}>Namaz</th>
+                <th style={{ padding: 10 }}>Official</th>
+                <th style={{ padding: 10 }}>Total</th>
+                <th style={{ padding: 10 }}>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {leaderboard.map((r) => {
+                const bg =
+                  r.status === "Exceeded" ? COLORS.badBg :
+                  r.status === "Near Limit" ? COLORS.warnBg : COLORS.okBg;
+
+                // progress helper
+                const capG = effectiveGeneralLimit;
+                const capN = effectiveNamazLimit;
+                const pctBar = (value, cap, color) => (
+                  <Box sx={{ minWidth: 140 }}>
+                    <Tooltip title={`${value} / ${cap} min`}>
+                      <LinearProgress
+                        variant="determinate"
+                        value={cap ? Math.min(100, (value / cap) * 100) : 0}
+                        sx={{ height: 8, borderRadius: 6, [`& .MuiLinearProgress-bar`]: { backgroundColor: color } }}
+                      />
+                    </Tooltip>
+                    <Typography variant="caption" sx={{ display: "block", mt: 0.5 }}>{value} m</Typography>
+                  </Box>
+                );
+
+                const medal = r.rank === 1 ? "🥇" : r.rank === 2 ? "🥈" : r.rank === 3 ? "🥉" : r.rank;
+
+                return (
+                  <tr key={r.id} style={{ background: bg, borderBottom: "1px solid #e5e7eb" }}>
+                    <td style={{ padding: 10, fontWeight: 700 }}>{medal}</td>
+                    <td style={{ padding: 10 }}>{r.name}</td>
+                    <td style={{ padding: 10 }}>{r.department}</td>
+                    <td style={{ padding: 10, textAlign: "center" }}>{pctBar(r.general, capG, COLORS.general)}</td>
+                    <td style={{ padding: 10, textAlign: "center" }}>{pctBar(r.namaz, capN, COLORS.namaz)}</td>
+                    <td style={{ padding: 10, fontWeight: 600, textAlign: "center" }}>{r.official} m</td>
+                    <td style={{ padding: 10, fontWeight: 700, textAlign: "center" }}>{r.total} m</td>
+                    <td style={{ padding: 10, textAlign: "center" }}>
+                      <Chip label={r.status} color={r.color} variant={r.status === "Obedient" ? "filled" : "outlined"} sx={{ fontWeight: 700 }} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </Box>
       </Card>
 
-      {/* Show All Employees Modal */}
-      <Dialog
-        open={openDialog}
-        onClose={() => setOpenDialog(false)}
-        maxWidth="sm"
-        fullWidth
-      >
+      {/* All Employees Modal */}
+      <Dialog open={openDialog} onClose={() => setOpenDialog(false)} maxWidth="sm" fullWidth>
         <DialogTitle>All Employees</DialogTitle>
         <DialogContent>
           <List>
             {employees.map((emp) => (
-              <ListItem key={emp.id}>
+              <ListItem key={emp.id || emp.emp_id || emp._id}>
                 <ListItemText
                   primary={emp.name}
-                  secondary={`Dept: ${emp.department} | Status: ${emp.latest_status}`}
+                  secondary={`Dept: ${emp.department || "-"} | Status: ${emp.latest_status || "-"}`}
                 />
               </ListItem>
             ))}
