@@ -390,7 +390,7 @@ export default function Employees() {
     if (mode !== "month") return;
     const [yy, mm] = month.split("-").map(Number);
     const start = `${yy}-${pad(mm)}-01`;
-    const endDate = new Date(yy, mm, 0).getDate();
+    const endDate = new Date(yy, mm, 0).getDate(); // days in month
     const end = `${yy}-${pad(mm)}-${pad(endDate)}`;
     setFrom(start);
     setTo(end);
@@ -413,17 +413,35 @@ export default function Employees() {
     return list;
   }, [employees, employeeFilter, search]);
 
-  /* ---------- Build rows ---------- */
+  /* ---------- Effective limits ---------- */
+  function getMonthDays() {
+    if (mode !== "month") return 1;
+    const [yy, mm] = month.split("-").map(Number);
+    return new Date(yy, mm, 0).getDate();
+  }
+  function effectiveGeneralLimit() {
+    const daily = (config.generalIdleLimit ?? 60);
+    return mode === "month" ? daily * getMonthDays() : daily;
+    // (range mode keeps daily limit as requested)
+  }
+  function effectiveNamazLimit() {
+    const daily = (config.namazLimit ?? 50);
+    return mode === "month" ? daily * getMonthDays() : daily;
+  }
+
+  /* ---------- Build rows (Exceeded uses effective limits) ---------- */
   function collectReportRows() {
     const rows = [];
+    const genCap = effectiveGeneralLimit();
+    const namCap = effectiveNamazLimit();
     const elist = filtered.length ? filtered : [];
     for (const emp of elist) {
       const sessions = (emp.idle_sessions || []).filter((s) =>
         inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start)
       );
       const sums = calcTotals(sessions);
-      const genEx = Math.max(0, sums.general - (config.generalIdleLimit ?? 60));
-      const namEx = Math.max(0, sums.namaz - (config.namazLimit ?? 50));
+      const genEx = Math.max(0, sums.general - genCap);
+      const namEx = Math.max(0, sums.namaz - namCap);
       rows.push([
         emp.emp_id || emp.id || emp._id,
         emp.name || "-",
@@ -432,7 +450,7 @@ export default function Employees() {
         sums.general,
         sums.namaz,
         sums.official,
-        Number(sums.autobreak.toFixed(1)),
+        Number(sums.autobreak).toFixed(1),
         genEx,
         namEx,
       ]);
@@ -440,27 +458,8 @@ export default function Employees() {
     return rows;
   }
 
-  function downloadCSV() {
-    const headers = [
-      "Employee ID","Name","Department","Total Idle (min)","General (min)",
-      "Namaz (min)","Official (min)","AutoBreak (min)",
-      "General Limit (60) Exceeded (min)","Namaz Limit (50) Exceeded (min)",
-    ];
-    const body = collectReportRows();
-    const csv = [headers, ...body].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    const label = mode === "day" ? day : `${from}_to_${to}`;
-    a.download = `employee_idle_report_${label}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  }
-
-  /* ---------- PDF: table-only, centered, eye-catching, landscape ---------- */
+  /* ---------- PDF: table-only, landscape, uses effective limits ---------- */
   function downloadPDF() {
-    // Landscape => wider table, no cut columns
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
 
     const pageW = doc.internal.pageSize.getWidth();
@@ -471,7 +470,17 @@ export default function Employees() {
     const label = mode === "day" ? day : `${from} → ${to}`;
     const title = mode === "day" ? "Daily Idle Report" : (mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report");
 
-    // Top bar header (kept minimal, no summary)
+    // Limits text
+    const gDaily = (config.generalIdleLimit ?? 60);
+    const nDaily = (config.namazLimit ?? 50);
+    const days = getMonthDays();
+    const gCap = effectiveGeneralLimit();
+    const nCap = effectiveNamazLimit();
+    const limitsText =
+      mode === "month"
+        ? `Limits: General ${gDaily}m/day (cap ${gCap}m), Namaz ${nDaily}m/day (cap ${nCap}m)`
+        : `Limits: General ${gDaily}m/day, Namaz ${nDaily}m/day`;
+
     const header = (data) => {
       doc.setFillColor(brand[0], brand[1], brand[2]);
       doc.rect(0, 0, pageW, 64, "F");
@@ -486,7 +495,7 @@ export default function Employees() {
       doc.text(title, 40, 46);
 
       doc.setFontSize(10);
-      doc.text(`Range: ${label}   |   TZ: Asia/Karachi   |   Limits: General ${config.generalIdleLimit ?? 60}m/day, Namaz ${config.namazLimit ?? 50}m/day`, pageW - 40, 26, { align: "right" });
+      doc.text(`Range: ${label}   |   TZ: Asia/Karachi   |   ${limitsText}`, pageW - 40, 26, { align: "right" });
     };
     const footer = (data) => {
       doc.setFontSize(9);
@@ -494,8 +503,7 @@ export default function Employees() {
       doc.text(`Page ${data.pageNumber}`, pageW / 2, doc.internal.pageSize.getHeight() - 14, { align: "center" });
     };
 
-    // Build body (drop raw exceed cols; we'll color cells by limits)
-    const raw = collectReportRows();
+    const raw = collectReportRows(); // includes totals and exceeded (based on effective caps)
     const body = raw.map(r => [r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]]);
 
     const headers = ["Emp ID","Name","Dept","Total (m)","General (m)","Namaz (m)","Official (m)","Auto (m)"];
@@ -503,11 +511,10 @@ export default function Employees() {
     autoTable(doc, {
       head: [headers],
       body,
-      // Centered look via equal margins
       margin: { left: 40, right: 40, top: 70, bottom: 28 },
       tableWidth: "auto",
       styles: { fontSize: 10, cellPadding: 6, halign: "center", valign: "middle" },
-      headStyles: { fillColor: accent, textColor: 255, halign: "center" }, // eye-catching header
+      headStyles: { fillColor: accent, textColor: 255, halign: "center" },
       theme: "striped",
       striped: true,
       alternateRowStyles: { fillColor: [248, 250, 252] },
@@ -520,33 +527,28 @@ export default function Employees() {
         if (data.section === "body" && [3,4,5,6,7].includes(data.column.index)) {
           data.cell.styles.fontStyle = "bold";
         }
-        // Eye-catching conditional colors for exceeded cells
+        // Conditional colors based on effective caps
         if (data.section === "body") {
-          const genLimit = (config.generalIdleLimit ?? 60);
-          const namLimit = (config.namazLimit ?? 50);
-
           if (data.column.index === 4) { // General
             const v = Number(data.cell.raw || 0);
-            if (v > genLimit) {
+            if (v > gCap) {
               data.cell.styles.fillColor = [255, 237, 213]; // orange-100
               data.cell.styles.textColor = [194, 65, 12];   // orange-600
             }
           }
           if (data.column.index === 5) { // Namaz
             const v = Number(data.cell.raw || 0);
-            if (v > namLimit) {
+            if (v > nCap) {
               data.cell.styles.fillColor = [254, 226, 226]; // red-100
               data.cell.styles.textColor = [220, 38, 38];   // red-600
             }
           }
         }
       },
-      // Keep columns readable; allow wrapping instead of cutting
       columnStyles: {
         1: { halign: "left" }, // Name
         2: { halign: "left" }, // Dept
       },
-      // Start right under the header bar
       startY: 84,
     });
 
@@ -558,14 +560,19 @@ export default function Employees() {
     const headers = [
       "Employee ID","Name","Department","Total Idle (min)","General (min)",
       "Namaz (min)","Official (min)","AutoBreak (min)",
-      "General Limit (60) Exceeded (min)","Namaz Limit (50) Exceeded (min)",
+      "General Limit Exceeded (min)","Namaz Limit Exceeded (min)",
     ];
-    const rows = collectReportRows();
+    const rows = collectReportRows(); // exceeded already uses effective caps
     const label = mode === "day" ? day : `${from}_to_${to}`;
     downloadXls(`employee_idle_report_${label}.xls`, headers, rows);
   }
 
-  const limitsNote = `General limit: ${config.generalIdleLimit ?? 60}m/day   Namaz limit: ${config.namazLimit ?? 50}m/day`;
+  const gDaily = (config.generalIdleLimit ?? 60);
+  const nDaily = (config.namazLimit ?? 50);
+  const note =
+    mode === "month"
+      ? `General: ${gDaily}m/day (×${new Date(Number(month.split("-")[0]), Number(month.split("-")[1]), 0).getDate()} days) • Namaz: ${nDaily}m/day`
+      : `General: ${gDaily}m/day • Namaz: ${nDaily}m/day`;
 
   return (
     <Box p={3}>
@@ -635,13 +642,13 @@ export default function Employees() {
         </Button>
         <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
           <MenuItem onClick={() => { setAnchorEl(null); downloadPDF(); }}>PDF (table only)</MenuItem>
-          <MenuItem onClick={() => { setAnchorEl(null); downloadCSV(); }}>CSV</MenuItem>
           <MenuItem onClick={() => { setAnchorEl(null); downloadXLS(); }}>Excel (.xls)</MenuItem>
+          {/* CSV removed as requested */}
         </Menu>
       </Box>
 
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
-        {mode === "day" ? `Range: ${day}` : `Range: ${from} → ${to}`} &nbsp; | &nbsp; {limitsNote} &nbsp; | &nbsp; TZ: Asia/Karachi
+        {mode === "day" ? `Range: ${day}` : `Range: ${from} → ${to}`} &nbsp; | &nbsp; {note} &nbsp; | &nbsp; TZ: Asia/Karachi
       </Typography>
 
       {/* Table (UI) */}
@@ -665,7 +672,7 @@ export default function Employees() {
                 pickedDay={day}
                 from={from}
                 to={to}
-                generalLimit={config.generalIdleLimit ?? 60}
+                generalLimit={effectiveGeneralLimit()}
               />
             ))}
           </TableBody>
@@ -674,5 +681,3 @@ export default function Employees() {
     </Box>
   );
 }
-
-
