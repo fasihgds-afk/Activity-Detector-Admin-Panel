@@ -4,6 +4,7 @@ import {
   TextField, Box, TableContainer, Avatar, Chip, Collapse, IconButton,
   Card, CardContent, Tooltip, Grid, Button, Menu, MenuItem, Select
 } from "@mui/material";
+import { useTheme, alpha } from "@mui/material/styles";
 import { KeyboardArrowDown, KeyboardArrowUp, AccessTime, Download } from "@mui/icons-material";
 import axios from "axios";
 import jsPDF from "jspdf";
@@ -127,6 +128,7 @@ function downloadXls(filename, headers, rows) {
    UI Row
    ========================= */
 function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
+  const theme = useTheme();
   const [open, setOpen] = useState(false);
   const all = Array.isArray(emp.idle_sessions) ? emp.idle_sessions : [];
 
@@ -147,12 +149,17 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
     return map;
   }, [all, emp.shift_start, emp.shift_end, dayMode, pickedDay, from, to]);
 
+  // theme-aware helper colors for dark/light
+  const trackBorder = alpha(theme.palette.divider, 0.4);
+  const cardBase = (col, opLight = 0.12, opDark = 0.18) =>
+    alpha(col, theme.palette.mode === "dark" ? opDark : opLight);
+
   return (
     <>
       <TableRow hover>
         <TableCell>
           <Box display="flex" alignItems="center" gap={2}>
-            <Avatar sx={{ bgcolor: "#6366F1", fontWeight: 600 }}>
+            <Avatar sx={{ bgcolor: theme.palette.primary.main, fontWeight: 600 }}>
               {emp.name?.charAt(0) || "?"}
             </Avatar>
             <Box>
@@ -203,16 +210,35 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
 
               {Object.entries(grouped).map(([key, sessions]) => {
                 const sums = calcTotals(sessions);
+                const generalExceeded = sums.general > generalLimit;
+
+                const totalBg    = cardBase(theme.palette.warning.main);
+                const officialBg = cardBase(theme.palette.info.main);
+                const namazBg    = cardBase(theme.palette.success.main);
+                const generalBg  = generalExceeded
+                  ? cardBase(theme.palette.error.main, 0.14, 0.24)
+                  : cardBase(theme.palette.success.main, 0.12, 0.18);
+
                 return (
-                  <Card key={key} sx={{ mb: 3, borderRadius: 3, boxShadow: 3 }}>
+                  <Card
+                    key={key}
+                    sx={{
+                      mb: 3,
+                      borderRadius: 3,
+                      boxShadow: 3,
+                      backgroundColor: alpha(theme.palette.background.paper, theme.palette.mode === "dark" ? 0.6 : 1),
+                      border: "1px solid",
+                      borderColor: trackBorder,
+                    }}
+                  >
                     <CardContent>
                       <Typography
                         variant="subtitle1"
                         fontWeight={700}
                         sx={{
                           mb: 2,
-                          color: "#fff",
-                          bgcolor: "#6366F1",
+                          color: theme.palette.getContrastText(theme.palette.primary.main),
+                          bgcolor: theme.palette.primary.main,
                           p: 1,
                           borderRadius: 2,
                           display: "inline-block",
@@ -242,11 +268,11 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
                                     fontWeight: 600,
                                     color: "#fff",
                                     bgcolor:
-                                      s.category === "Official"   ? "#3b82f6" :
-                                      s.category === "General"    ? "#f59e0b" :
-                                      s.category === "Namaz"      ? "#10b981" :
-                                      s.category === "AutoBreak"  ? "#ef4444" :
-                                                                    "#9ca3af",
+                                      s.category === "Official"   ? theme.palette.info.main :
+                                      s.category === "General"    ? theme.palette.warning.main :
+                                      s.category === "Namaz"      ? theme.palette.success.main :
+                                      s.category === "AutoBreak"  ? theme.palette.error.main :
+                                                                    theme.palette.grey[600],
                                   }}
                                 />
                               </TableCell>
@@ -266,7 +292,12 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
                       <Box mt={2}>
                         <Grid container spacing={2}>
                           <Grid item xs={12} md={3}>
-                            <Card sx={{ p: 2, borderRadius: 3, bgcolor: "#fff7ed" }}>
+                            <Card
+                              sx={{
+                                p: 2, borderRadius: 3, bgcolor: totalBg,
+                                border: "1px solid", borderColor: trackBorder,
+                              }}
+                            >
                               <Typography fontWeight={700} color="warning.main">
                                 Total Time
                               </Typography>
@@ -276,8 +307,13 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
                             </Card>
                           </Grid>
                           <Grid item xs={12} md={3}>
-                            <Card sx={{ p: 2, borderRadius: 3, bgcolor: "#eff6ff" }}>
-                              <Typography fontWeight={700} color="primary.main">
+                            <Card
+                              sx={{
+                                p: 2, borderRadius: 3, bgcolor: officialBg,
+                                border: "1px solid", borderColor: trackBorder,
+                              }}
+                            >
+                              <Typography fontWeight={700} color="info.main">
                                 Official Break Time
                               </Typography>
                               <Typography variant="h6" fontWeight={800}>
@@ -286,7 +322,12 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
                             </Card>
                           </Grid>
                           <Grid item xs={12} md={3}>
-                            <Card sx={{ p: 2, borderRadius: 3, bgcolor: "#ecfdf5" }}>
+                            <Card
+                              sx={{
+                                p: 2, borderRadius: 3, bgcolor: namazBg,
+                                border: "1px solid", borderColor: trackBorder,
+                              }}
+                            >
                               <Typography fontWeight={700} color="success.main">
                                 Namaz Break Time
                               </Typography>
@@ -300,15 +341,15 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
                               sx={{
                                 p: 2,
                                 borderRadius: 3,
-                                bgcolor: sums.general > generalLimit ? "#fecaca" : "#e9ffe9",
+                                bgcolor: generalBg,
+                                border: "1px solid",
+                                borderColor: trackBorder,
                               }}
                             >
                               <Typography fontWeight={700}>General Break Time</Typography>
                               <Typography variant="h6" fontWeight={800}>
                                 {sums.general} min{" "}
-                                {sums.general > generalLimit
-                                  ? `(Exceeded by ${sums.general - generalLimit})`
-                                  : ""}
+                                {generalExceeded ? `(Exceeded by ${sums.general - generalLimit})` : ""}
                               </Typography>
                             </Card>
                           </Grid>
@@ -330,6 +371,7 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
    Main Screen
    ========================= */
 export default function Employees() {
+  const theme = useTheme();
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
   const [config, setConfig] = useState({ generalIdleLimit: 60, namazLimit: 50 });
@@ -574,6 +616,9 @@ export default function Employees() {
       ? `General: ${gDaily}m/day (×${new Date(Number(month.split("-")[0]), Number(month.split("-")[1]), 0).getDate()} days) • Namaz: ${nDaily}m/day`
       : `General: ${gDaily}m/day • Namaz: ${nDaily}m/day`;
 
+  // theme-aware header gradient
+  const headerGradient = `linear-gradient(90deg, ${theme.palette.primary.main}, ${theme.palette.secondary?.main || theme.palette.success.main})`;
+
   return (
     <Box p={3}>
       {/* Controls */}
@@ -655,7 +700,7 @@ export default function Employees() {
       <TableContainer component={Paper} elevation={5} sx={{ borderRadius: "18px" }}>
         <Table>
           <TableHead>
-            <TableRow sx={{ background: "linear-gradient(90deg,#6366F1,#14B8A6)" }}>
+            <TableRow sx={{ background: headerGradient }}>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Name</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Department</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Shift</TableCell>
