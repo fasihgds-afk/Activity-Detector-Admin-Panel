@@ -62,6 +62,9 @@ function inPickedRange(shiftDate, mode, day, from, to, idleStartISO) {
   if (!sd) return false;
 
   if (mode === "day") return sd === day;
+  if (mode === "month") {
+    return sd >= from && sd <= to;
+  }
   if (!from || !to) return true;
   return sd >= from && sd <= to;
 }
@@ -82,7 +85,7 @@ function calcTotals(sessions) {
 /* -------- XLS maker -------- */
 function downloadXls(filename, headers, rows) {
   const headerHtml = headers
-    .map((h) => `<th style="background:#6366F1;color:#fff;padding:8px;border:1px solid #e5e7eb;text-align:center">${h}</th>`)
+    .map((h) => `<th style="background:#1f2937;color:#fff;padding:10px 8px;border:1px solid #e5e7eb;text-align:center;font-weight:700">${h}</th>`)
     .join("");
 
   const rowHtml = rows
@@ -90,10 +93,10 @@ function downloadXls(filename, headers, rows) {
       (r) =>
         `<tr>${r
           .map((c, i) => {
-            const base = "padding:6px;border:1px solid #e5e7eb;text-align:center";
+            const base = "padding:8px;border:1px solid #e5e7eb;text-align:center";
             let bg = "";
-            if (i === 7) bg = "background:#FEF3C7;";
-            if (i === 8 || i === 9) bg = "background:#FEE2E2;";
+            if (i === 8) bg = "background:#fef9c3;";
+            if (i === 9) bg = "background:#fee2e2;";
             return `<td style="${base};${bg}">${String(c)}</td>`;
           })
           .join("")}</tr>`
@@ -345,8 +348,13 @@ export default function Employees() {
   const [config, setConfig] = useState({ generalIdleLimit: 60, namazLimit: 50 });
   const [employeeFilter, setEmployeeFilter] = useState("all");
 
-  const [mode, setMode] = useState("day");
+  // NEW: add "month" mode for clean monthly reports
+  const [mode, setMode] = useState("day"); // 'day' | 'month' | 'range'
   const [day, setDay]   = useState(currentShiftYmd());
+  const [month, setMonth] = useState(() => {
+    const [y, m] = currentShiftYmd().split("-"); 
+    return `${y}-${m}`;
+  });
   const [from, setFrom] = useState(currentShiftYmd());
   const [to, setTo]     = useState(currentShiftYmd());
   const [autoShiftDay, setAutoShiftDay] = useState(true);
@@ -389,6 +397,17 @@ export default function Employees() {
     }, 60_000);
     return () => clearInterval(t);
   }, [mode, autoShiftDay]);
+
+  // When month changes, compute its from/to bounds
+  useEffect(() => {
+    if (mode !== "month") return;
+    const [yy, mm] = month.split("-").map(Number);
+    const start = `${yy}-${pad(mm)}-01`;
+    const endDate = new Date(yy, mm, 0).getDate();
+    const end = `${yy}-${pad(mm)}-${pad(endDate)}`;
+    setFrom(start);
+    setTo(end);
+  }, [mode, month]);
 
   const filtered = useMemo(() => {
     let list = Array.isArray(employees) ? employees : [];
@@ -433,6 +452,10 @@ export default function Employees() {
     return rows;
   }
 
+  function sumColumn(rows, idx) {
+    return rows.reduce((a, r) => a + Number(r[idx] || 0), 0);
+  }
+
   function downloadCSV() {
     const headers = [
       "Employee ID","Name","Department","Total Idle (min)","General (min)",
@@ -451,32 +474,122 @@ export default function Employees() {
     document.body.removeChild(a);
   }
 
+  // Polished PDF with clean heading and summary (Daily / Monthly / Range)
   function downloadPDF() {
     const doc = new jsPDF({ unit: "pt", format: "a4" });
     const label = mode === "day" ? day : `${from} → ${to}`;
+    const title = mode === "day" ? "Daily Idle Report" : (mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report");
 
-    doc.setFontSize(16);
-    doc.setTextColor("#111827");
-    doc.text(`Employee Idle Report (${label})`, 40, 40);
+    const gray900 = "#111827";
+    const gray600 = "#4b5563";
+    const brand = [31, 41, 55];
+    const accent = [99, 102, 241];
 
-    doc.setFontSize(10);
-    doc.setTextColor("#374151");
-    doc.text(`Timezone: Asia/Karachi`, 40, 58);
-    doc.text(`Limits — General: ${config.generalIdleLimit ?? 60} min/day, Namaz: ${config.namazLimit ?? 50} min/day`, 40, 73);
+    const header = (data) => {
+      doc.setFillColor(brand[0], brand[1], brand[2]);
+      doc.rect(0, 0, doc.internal.pageSize.getWidth(), 70, "F");
 
-    const headers = ["Emp ID","Name","Department","Total","General","Namaz","Official","AutoBreak","Gen Exceed","Namaz Exceed"];
-    const body = collectReportRows();
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(18);
+      doc.setTextColor("#ffffff");
+      doc.text("Employee Idle Report", 40, 28);
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(12);
+      doc.text(title, 40, 48);
+
+      doc.setFontSize(10);
+      doc.text(`Date / Range: ${label}`, doc.internal.pageSize.getWidth() - 40, 24, { align: "right" });
+      doc.text(`Timezone: Asia/Karachi`, doc.internal.pageSize.getWidth() - 40, 38, { align: "right" });
+      doc.text(
+        `Limits — General: ${config.generalIdleLimit ?? 60} min/day, Namaz: ${config.namazLimit ?? 50} min/day`,
+        doc.internal.pageSize.getWidth() - 40, 52, { align: "right" }
+      );
+    };
+
+    const footer = (data) => {
+      const str = `Page ${data.pageNumber}`;
+      doc.setFontSize(9);
+      doc.setTextColor(gray600);
+      doc.text(str, doc.internal.pageSize.getWidth() / 2, doc.internal.pageSize.getHeight() - 16, { align: "center" });
+    };
+
+    const rows = collectReportRows();
+    const totalEmployees = rows.length;
+    const sum = (i) => rows.reduce((a, r) => a + Number(r[i] || 0), 0);
+    const sumTotal = sum(3), sumGeneral = sum(4), sumNamaz = sum(5),
+          sumOfficial = sum(6), sumAuto = sum(7), sumGenEx = sum(8), sumNamEx = sum(9);
+
+    header({ pageNumber: 1 });
+
+    // Summary
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(gray900);
+    doc.setFontSize(12);
+    doc.text("Summary", 40, 95);
+
+    const pill = (x, y, labelTxt, value) => {
+      doc.setDrawColor(230);
+      doc.setFillColor(245, 247, 250);
+      doc.roundedRect(x, y, 140, 50, 6, 6, "FD");
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(gray600);
+      doc.setFontSize(10);
+      doc.text(labelTxt, x + 12, y + 18);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(gray900);
+      doc.setFontSize(14);
+      doc.text(String(value), x + 12, y + 38);
+    };
+
+    const y0 = 110;
+    pill(40, y0, "Employees", totalEmployees);
+    pill(190, y0, "Total Idle (min)", sumTotal.toFixed(1));
+    pill(340, y0, "General (min)", sumGeneral);
+    pill(490, y0, "Namaz (min)", sumNamaz);
+    pill(40, y0 + 60, "Official (min)", sumOfficial);
+    pill(190, y0 + 60, "AutoBreak (min)", sumAuto.toFixed(1));
+    pill(340, y0 + 60, "Gen Exceeded (min)", sumGenEx);
+    pill(490, y0 + 60, "Namaz Exceeded (min)", sumNamEx);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    doc.setTextColor(gray600);
+    doc.text("Legend: Exceeded = Minutes beyond daily limit", 40, y0 + 130);
+
+    const headers = [
+      "Emp ID","Name","Department","Total (m)","General (m)","Namaz (m)","Official (m)","AutoBreak (m)","Gen Exceed","Namaz Exceed"
+    ];
 
     autoTable(doc, {
       head: [headers],
-      body,
-      startY: 90,
-      styles: { fontSize: 9, cellPadding: 4 },
-      headStyles: { fillColor: [99, 102, 241], textColor: 255, halign: "center" },
-      columnStyles: { 0: { cellWidth: 90 }, 1: { cellWidth: 120 }, 2: { cellWidth: 95 } },
+      body: rows,
+      startY: y0 + 145,
+      styles: { fontSize: 9, cellPadding: 6, halign: "center", valign: "middle" },
+      headStyles: { fillColor: accent, textColor: 255, halign: "center" },
+      columnStyles: {
+        0: { cellWidth: 70, halign: "left" },
+        1: { cellWidth: 120, halign: "left" },
+        2: { cellWidth: 90, halign: "left" },
+        8: { fillColor: [254, 249, 195] },
+        9: { fillColor: [254, 226, 226] },
+      },
+      theme: "grid",
+      didDrawPage: (data) => {
+        header(data);
+        footer(data);
+      },
+      didParseCell: (data) => {
+        if (data.section === "body" && [3,4,5,6,7].includes(data.column.index)) {
+          data.cell.styles.fontStyle = "bold";
+        }
+      },
+      alternateRowStyles: { fillColor: [248, 250, 252] },
+      margin: { left: 40, right: 40, top: 70, bottom: 30 }
     });
 
-    doc.save(`employee_idle_report_${label}.pdf`);
+    const fileLabel = mode === "day" ? day : `${from.replaceAll("-","")}_${to.replaceAll("-","")}`;
+    doc.save(`employee_idle_report_${fileLabel}.pdf`);
   }
 
   function downloadXLS() {
@@ -519,11 +632,12 @@ export default function Employees() {
         </Select>
 
         <Select size="small" value={mode} onChange={(e) => setMode(e.target.value)}>
-          <MenuItem value="day">TODAY / DAY</MenuItem>
+          <MenuItem value="day">DAILY</MenuItem>
+          <MenuItem value="month">MONTHLY</MenuItem>
           <MenuItem value="range">CUSTOM RANGE</MenuItem>
         </Select>
 
-        {mode === "day" ? (
+        {mode === "day" && (
           <TextField
             label="Pick a day"
             type="date"
@@ -532,7 +646,20 @@ export default function Employees() {
             onChange={(e) => { setAutoShiftDay(false); setDay(e.target.value); }}
             InputLabelProps={{ shrink: true }}
           />
-        ) : (
+        )}
+
+        {mode === "month" && (
+          <TextField
+            label="Pick a month"
+            type="month"
+            size="small"
+            value={month}
+            onChange={(e) => setMonth(e.target.value)}
+            InputLabelProps={{ shrink: true }}
+          />
+        )}
+
+        {mode === "range" && (
           <>
             <TextField label="From" type="date" size="small" value={from} onChange={(e) => setFrom(e.target.value)} InputLabelProps={{ shrink: true }} />
             <TextField label="To"   type="date" size="small" value={to}   onChange={(e) => setTo(e.target.value)}   InputLabelProps={{ shrink: true }} />
@@ -545,14 +672,14 @@ export default function Employees() {
           Download Report
         </Button>
         <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
+          <MenuItem onClick={() => { setAnchorEl(null); downloadPDF(); }}>PDF (polished)</MenuItem>
           <MenuItem onClick={() => { setAnchorEl(null); downloadCSV(); }}>CSV</MenuItem>
-          <MenuItem onClick={() => { setAnchorEl(null); downloadPDF(); }}>PDF</MenuItem>
-          <MenuItem onClick={() => { setAnchorEl(null); downloadXLS(); }}>Excel (.xls, colored)</MenuItem>
+          <MenuItem onClick={() => { setAnchorEl(null); downloadXLS(); }}>Excel (.xls)</MenuItem>
         </Menu>
       </Box>
 
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
-        Range: {mode === "day" ? day : `${from} → ${to}`} &nbsp; | &nbsp; {limitsNote} &nbsp; | &nbsp; TZ: Asia/Karachi
+        {mode === "day" ? `Range: ${day}` : `Range: ${from} → ${to}`} &nbsp; | &nbsp; {limitsNote} &nbsp; | &nbsp; TZ: Asia/Karachi
       </Typography>
 
       {/* Table */}
