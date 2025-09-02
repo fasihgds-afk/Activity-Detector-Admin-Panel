@@ -80,7 +80,7 @@ function calcTotals(sessions) {
   return t;
 }
 
-/* -------- XLS maker (unchanged schema) -------- */
+/* -------- XLS maker (schema unchanged) -------- */
 function downloadXls(filename, headers, rows) {
   const headerHtml = headers
     .map((h) => `<th style="background:#1f2937;color:#fff;padding:10px 8px;border:1px solid #e5e7eb;text-align:center;font-weight:700">${h}</th>`)
@@ -124,11 +124,10 @@ function downloadXls(filename, headers, rows) {
 }
 
 /* =========================
-   Employee Row (UI)
+   UI Row
    ========================= */
-function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLimit }) {
+function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
   const [open, setOpen] = useState(false);
-
   const all = Array.isArray(emp.idle_sessions) ? emp.idle_sessions : [];
 
   const grouped = useMemo(() => {
@@ -313,16 +312,6 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLim
                               </Typography>
                             </Card>
                           </Grid>
-                          <Grid item xs={12} md={3}>
-                            <Card sx={{ p: 2, borderRadius: 3, bgcolor: "#fee2e2" }}>
-                              <Typography fontWeight={700} color="error.main">
-                                AutoBreak Time
-                              </Typography>
-                              <Typography variant="h6" fontWeight={800}>
-                                {Number(sums.autobreak).toFixed(1)} min
-                              </Typography>
-                            </Card>
-                          </Grid>
                         </Grid>
                       </Box>
                     </CardContent>
@@ -346,7 +335,7 @@ export default function Employees() {
   const [config, setConfig] = useState({ generalIdleLimit: 60, namazLimit: 50 });
   const [employeeFilter, setEmployeeFilter] = useState("all");
 
-  // Modes for report
+  // Modes
   const [mode, setMode] = useState("day"); // 'day' | 'month' | 'range'
   const [day, setDay]   = useState(currentShiftYmd());
   const [month, setMonth] = useState(() => {
@@ -424,7 +413,7 @@ export default function Employees() {
     return list;
   }, [employees, employeeFilter, search]);
 
-  /* ---------- Assemble rows for reports ---------- */
+  /* ---------- Build rows ---------- */
   function collectReportRows() {
     const rows = [];
     const elist = filtered.length ? filtered : [];
@@ -451,10 +440,6 @@ export default function Employees() {
     return rows;
   }
 
-  function sumColumn(rows, idx) {
-    return rows.reduce((a, r) => a + Number(r[idx] || 0), 0);
-  }
-
   function downloadCSV() {
     const headers = [
       "Employee ID","Name","Department","Total Idle (min)","General (min)",
@@ -473,148 +458,96 @@ export default function Employees() {
     document.body.removeChild(a);
   }
 
-  /* ---------- PRO PDF: clean header + employee-wise summary with flags ---------- */
+  /* ---------- PDF: table-only, centered, eye-catching, landscape ---------- */
   function downloadPDF() {
-    const doc = new jsPDF({ unit: "pt", format: "a4" });
-    const label = mode === "day" ? day : `${from} → ${to}`;
-    const title = mode === "day" ? "Daily Idle Report" : (mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report");
+    // Landscape => wider table, no cut columns
+    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
 
-    const gray900 = "#111827";
-    const gray700 = "#374151";
+    const pageW = doc.internal.pageSize.getWidth();
     const gray600 = "#4b5563";
     const brand = [31, 41, 55];
     const accent = [99, 102, 241];
 
+    const label = mode === "day" ? day : `${from} → ${to}`;
+    const title = mode === "day" ? "Daily Idle Report" : (mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report");
+
+    // Top bar header (kept minimal, no summary)
     const header = (data) => {
       doc.setFillColor(brand[0], brand[1], brand[2]);
-      doc.rect(0, 0, doc.internal.pageSize.getWidth(), 70, "F");
+      doc.rect(0, 0, pageW, 64, "F");
 
       doc.setFont("helvetica", "bold");
-      doc.setFontSize(18);
+      doc.setFontSize(20);
       doc.setTextColor("#ffffff");
-      doc.text("Employee Idle Report", 40, 28);
+      doc.text("Employee Idle Report", 40, 26);
 
       doc.setFont("helvetica", "normal");
       doc.setFontSize(12);
-      doc.text(title, 40, 48);
+      doc.text(title, 40, 46);
 
       doc.setFontSize(10);
-      doc.text(`Date / Range: ${label}`, doc.internal.pageSize.getWidth() - 40, 24, { align: "right" });
-      doc.text(`Timezone: Asia/Karachi`, doc.internal.pageSize.getWidth() - 40, 38, { align: "right" });
-      doc.text(
-        `Limits — General: ${config.generalIdleLimit ?? 60} min/day, Namaz: ${config.namazLimit ?? 50} min/day`,
-        doc.internal.pageSize.getWidth() - 40, 52, { align: "right" }
-      );
+      doc.text(`Range: ${label}   |   TZ: Asia/Karachi   |   Limits: General ${config.generalIdleLimit ?? 60}m/day, Namaz ${config.namazLimit ?? 50}m/day`, pageW - 40, 26, { align: "right" });
     };
-
     const footer = (data) => {
-      const str = `Page ${data.pageNumber}`;
       doc.setFontSize(9);
       doc.setTextColor(gray600);
-      doc.text(str, doc.internal.pageSize.getWidth() / 2, doc.internal.pageSize.getHeight() - 16, { align: "center" });
+      doc.text(`Page ${data.pageNumber}`, pageW / 2, doc.internal.pageSize.getHeight() - 14, { align: "center" });
     };
 
-    const rows = collectReportRows();
-    const totalEmployees = rows.length;
-    const sum = (i) => rows.reduce((a, r) => a + Number(r[i] || 0), 0);
-    const sumTotal = sum(3), sumGeneral = sum(4), sumNamaz = sum(5),
-          sumOfficial = sum(6), sumAuto = sum(7), sumGenEx = sum(8), sumNamEx = sum(9);
+    // Build body (drop raw exceed cols; we'll color cells by limits)
+    const raw = collectReportRows();
+    const body = raw.map(r => [r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]]);
 
-    header({ pageNumber: 1 });
-
-    // Summary band
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(gray900);
-    doc.setFontSize(12);
-    doc.text("Summary", 40, 95);
-
-    const pill = (x, y, labelTxt, value) => {
-      doc.setDrawColor(230);
-      doc.setFillColor(245, 247, 250);
-      doc.roundedRect(x, y, 140, 50, 6, 6, "FD");
-      doc.setFont("helvetica", "normal");
-      doc.setTextColor(gray600);
-      doc.setFontSize(10);
-      doc.text(labelTxt, x + 12, y + 18);
-      doc.setFont("helvetica", "bold");
-      doc.setTextColor(gray900);
-      doc.setFontSize(14);
-      doc.text(String(value), x + 12, y + 38);
-    };
-
-    const y0 = 110;
-    pill(40, y0, "Employees", totalEmployees);
-    pill(190, y0, "Total Idle (min)", sumTotal.toFixed(1));
-    pill(340, y0, "General (min)", sumGeneral);
-    pill(490, y0, "Namaz (min)", sumNamaz);
-    pill(40, y0 + 60, "Official (min)", sumOfficial);
-    pill(190, y0 + 60, "AutoBreak (min)", sumAuto.toFixed(1));
-    pill(340, y0 + 60, "Gen Exceeded (min)", sumGenEx);
-    pill(490, y0 + 60, "Namaz Exceeded (min)", sumNamEx);
-
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9);
-    doc.setTextColor(gray700);
-    doc.text("Flags: GEN = General exceeded, NAM = Namaz exceeded", 40, y0 + 130);
-
-    // Build employee-wise rows with a Flags column and exceeded markers
-    const rowsWithFlags = rows.map(r => {
-      const genEx = Number(r[8] || 0);
-      const namEx = Number(r[9] || 0);
-      const flags = genEx > 0 && namEx > 0 ? "GEN | NAM" : genEx > 0 ? "GEN" : namEx > 0 ? "NAM" : "OK";
-      return [...r.slice(0, 8), flags]; // drop raw exceed columns, add Flags
-    });
-
-    const exceededRowIndex = rows.map(r => (Number(r[8]) > 0 || Number(r[9]) > 0));
-
-    // Headings designed to avoid ugly wraps
-    const headers = [
-      "Emp ID","Name","Dept","Total (m)","General (m)","Namaz (m)","Official (m)","Auto (m)","Flags"
-    ];
+    const headers = ["Emp ID","Name","Dept","Total (m)","General (m)","Namaz (m)","Official (m)","Auto (m)"];
 
     autoTable(doc, {
       head: [headers],
-      body: rowsWithFlags,
-      startY: y0 + 145,
-      styles: { fontSize: 9, cellPadding: 6, halign: "center", valign: "middle" },
-      headStyles: { fillColor: accent, textColor: 255, halign: "center" },
-      columnStyles: {
-        0: { cellWidth: 70, halign: "left" },
-        1: { cellWidth: 130, halign: "left" },
-        2: { cellWidth: 90,  halign: "left" },
-        3: { cellWidth: 70 },
-        4: { cellWidth: 75 },
-        5: { cellWidth: 75 },
-        6: { cellWidth: 75 },
-        7: { cellWidth: 70 },
-        8: { cellWidth: 65, fontStyle: "bold" },
-      },
-      theme: "grid",
+      body,
+      // Centered look via equal margins
+      margin: { left: 40, right: 40, top: 70, bottom: 28 },
+      tableWidth: "auto",
+      styles: { fontSize: 10, cellPadding: 6, halign: "center", valign: "middle" },
+      headStyles: { fillColor: accent, textColor: 255, halign: "center" }, // eye-catching header
+      theme: "striped",
+      striped: true,
+      alternateRowStyles: { fillColor: [248, 250, 252] },
       didDrawPage: (data) => {
         header(data);
         footer(data);
       },
       didParseCell: (data) => {
-        // Bold numeric totals
+        // Bold numeric columns
         if (data.section === "body" && [3,4,5,6,7].includes(data.column.index)) {
           data.cell.styles.fontStyle = "bold";
         }
-        // Highlight whole row if any limit exceeded
-        if (data.section === "body" && exceededRowIndex[data.row.index]) {
-          data.cell.styles.fillColor = [255, 241, 240]; // soft red
-        }
-        // Flags coloring
-        if (data.section === "body" && data.column.index === 8) {
-          const v = String(data.cell.raw || "");
-          if (v.includes("GEN") || v.includes("NAM")) {
-            data.cell.styles.textColor = [220, 38, 38]; // red-600
-          } else {
-            data.cell.styles.textColor = [16, 185, 129]; // green-500
+        // Eye-catching conditional colors for exceeded cells
+        if (data.section === "body") {
+          const genLimit = (config.generalIdleLimit ?? 60);
+          const namLimit = (config.namazLimit ?? 50);
+
+          if (data.column.index === 4) { // General
+            const v = Number(data.cell.raw || 0);
+            if (v > genLimit) {
+              data.cell.styles.fillColor = [255, 237, 213]; // orange-100
+              data.cell.styles.textColor = [194, 65, 12];   // orange-600
+            }
+          }
+          if (data.column.index === 5) { // Namaz
+            const v = Number(data.cell.raw || 0);
+            if (v > namLimit) {
+              data.cell.styles.fillColor = [254, 226, 226]; // red-100
+              data.cell.styles.textColor = [220, 38, 38];   // red-600
+            }
           }
         }
       },
-      alternateRowStyles: { fillColor: [248, 250, 252] },
-      margin: { left: 40, right: 40, top: 70, bottom: 30 }
+      // Keep columns readable; allow wrapping instead of cutting
+      columnStyles: {
+        1: { halign: "left" }, // Name
+        2: { halign: "left" }, // Dept
+      },
+      // Start right under the header bar
+      startY: 84,
     });
 
     const fileLabel = mode === "day" ? day : `${from.replaceAll("-","")}_${to.replaceAll("-","")}`;
@@ -701,7 +634,7 @@ export default function Employees() {
           Download Report
         </Button>
         <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
-          <MenuItem onClick={() => { setAnchorEl(null); downloadPDF(); }}>PDF (HR-friendly)</MenuItem>
+          <MenuItem onClick={() => { setAnchorEl(null); downloadPDF(); }}>PDF (table only)</MenuItem>
           <MenuItem onClick={() => { setAnchorEl(null); downloadCSV(); }}>CSV</MenuItem>
           <MenuItem onClick={() => { setAnchorEl(null); downloadXLS(); }}>Excel (.xls)</MenuItem>
         </Menu>
@@ -711,7 +644,7 @@ export default function Employees() {
         {mode === "day" ? `Range: ${day}` : `Range: ${from} → ${to}`} &nbsp; | &nbsp; {limitsNote} &nbsp; | &nbsp; TZ: Asia/Karachi
       </Typography>
 
-      {/* Table (UI unchanged) */}
+      {/* Table (UI) */}
       <TableContainer component={Paper} elevation={5} sx={{ borderRadius: "18px" }}>
         <Table>
           <TableHead>
@@ -733,7 +666,6 @@ export default function Employees() {
                 from={from}
                 to={to}
                 generalLimit={config.generalIdleLimit ?? 60}
-                namazLimit={config.namazLimit ?? 50}
               />
             ))}
           </TableBody>
@@ -742,4 +674,5 @@ export default function Employees() {
     </Box>
   );
 }
+
 
