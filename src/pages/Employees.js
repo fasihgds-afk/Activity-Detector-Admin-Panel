@@ -62,9 +62,7 @@ function inPickedRange(shiftDate, mode, day, from, to, idleStartISO) {
   if (!sd) return false;
 
   if (mode === "day") return sd === day;
-  if (mode === "month") {
-    return sd >= from && sd <= to;
-  }
+  if (mode === "month") return sd >= from && sd <= to;
   if (!from || !to) return true;
   return sd >= from && sd <= to;
 }
@@ -82,7 +80,7 @@ function calcTotals(sessions) {
   return t;
 }
 
-/* -------- XLS maker -------- */
+/* -------- XLS maker (unchanged schema) -------- */
 function downloadXls(filename, headers, rows) {
   const headerHtml = headers
     .map((h) => `<th style="background:#1f2937;color:#fff;padding:10px 8px;border:1px solid #e5e7eb;text-align:center;font-weight:700">${h}</th>`)
@@ -95,8 +93,8 @@ function downloadXls(filename, headers, rows) {
           .map((c, i) => {
             const base = "padding:8px;border:1px solid #e5e7eb;text-align:center";
             let bg = "";
-            if (i === 8) bg = "background:#fef9c3;";
-            if (i === 9) bg = "background:#fee2e2;";
+            if (i === 8) bg = "background:#fef9c3;"; // Gen Exceed
+            if (i === 9) bg = "background:#fee2e2;"; // Namaz Exceed
             return `<td style="${base};${bg}">${String(c)}</td>`;
           })
           .join("")}</tr>`
@@ -126,7 +124,7 @@ function downloadXls(filename, headers, rows) {
 }
 
 /* =========================
-   Row Component
+   Employee Row (UI)
    ========================= */
 function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, namazLimit }) {
   const [open, setOpen] = useState(false);
@@ -348,11 +346,11 @@ export default function Employees() {
   const [config, setConfig] = useState({ generalIdleLimit: 60, namazLimit: 50 });
   const [employeeFilter, setEmployeeFilter] = useState("all");
 
-  // NEW: add "month" mode for clean monthly reports
+  // Modes for report
   const [mode, setMode] = useState("day"); // 'day' | 'month' | 'range'
   const [day, setDay]   = useState(currentShiftYmd());
   const [month, setMonth] = useState(() => {
-    const [y, m] = currentShiftYmd().split("-"); 
+    const [y, m] = currentShiftYmd().split("-");
     return `${y}-${m}`;
   });
   const [from, setFrom] = useState(currentShiftYmd());
@@ -398,7 +396,7 @@ export default function Employees() {
     return () => clearInterval(t);
   }, [mode, autoShiftDay]);
 
-  // When month changes, compute its from/to bounds
+  // Month bounds
   useEffect(() => {
     if (mode !== "month") return;
     const [yy, mm] = month.split("-").map(Number);
@@ -426,6 +424,7 @@ export default function Employees() {
     return list;
   }, [employees, employeeFilter, search]);
 
+  /* ---------- Assemble rows for reports ---------- */
   function collectReportRows() {
     const rows = [];
     const elist = filtered.length ? filtered : [];
@@ -474,13 +473,14 @@ export default function Employees() {
     document.body.removeChild(a);
   }
 
-  // Polished PDF with clean heading and summary (Daily / Monthly / Range)
+  /* ---------- PRO PDF: clean header + employee-wise summary with flags ---------- */
   function downloadPDF() {
     const doc = new jsPDF({ unit: "pt", format: "a4" });
     const label = mode === "day" ? day : `${from} → ${to}`;
     const title = mode === "day" ? "Daily Idle Report" : (mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report");
 
     const gray900 = "#111827";
+    const gray700 = "#374151";
     const gray600 = "#4b5563";
     const brand = [31, 41, 55];
     const accent = [99, 102, 241];
@@ -522,7 +522,7 @@ export default function Employees() {
 
     header({ pageNumber: 1 });
 
-    // Summary
+    // Summary band
     doc.setFont("helvetica", "bold");
     doc.setTextColor(gray900);
     doc.setFontSize(12);
@@ -554,25 +554,40 @@ export default function Employees() {
 
     doc.setFont("helvetica", "normal");
     doc.setFontSize(9);
-    doc.setTextColor(gray600);
-    doc.text("Legend: Exceeded = Minutes beyond daily limit", 40, y0 + 130);
+    doc.setTextColor(gray700);
+    doc.text("Flags: GEN = General exceeded, NAM = Namaz exceeded", 40, y0 + 130);
 
+    // Build employee-wise rows with a Flags column and exceeded markers
+    const rowsWithFlags = rows.map(r => {
+      const genEx = Number(r[8] || 0);
+      const namEx = Number(r[9] || 0);
+      const flags = genEx > 0 && namEx > 0 ? "GEN | NAM" : genEx > 0 ? "GEN" : namEx > 0 ? "NAM" : "OK";
+      return [...r.slice(0, 8), flags]; // drop raw exceed columns, add Flags
+    });
+
+    const exceededRowIndex = rows.map(r => (Number(r[8]) > 0 || Number(r[9]) > 0));
+
+    // Headings designed to avoid ugly wraps
     const headers = [
-      "Emp ID","Name","Department","Total (m)","General (m)","Namaz (m)","Official (m)","AutoBreak (m)","Gen Exceed","Namaz Exceed"
+      "Emp ID","Name","Dept","Total (m)","General (m)","Namaz (m)","Official (m)","Auto (m)","Flags"
     ];
 
     autoTable(doc, {
       head: [headers],
-      body: rows,
+      body: rowsWithFlags,
       startY: y0 + 145,
       styles: { fontSize: 9, cellPadding: 6, halign: "center", valign: "middle" },
       headStyles: { fillColor: accent, textColor: 255, halign: "center" },
       columnStyles: {
         0: { cellWidth: 70, halign: "left" },
-        1: { cellWidth: 120, halign: "left" },
-        2: { cellWidth: 90, halign: "left" },
-        8: { fillColor: [254, 249, 195] },
-        9: { fillColor: [254, 226, 226] },
+        1: { cellWidth: 130, halign: "left" },
+        2: { cellWidth: 90,  halign: "left" },
+        3: { cellWidth: 70 },
+        4: { cellWidth: 75 },
+        5: { cellWidth: 75 },
+        6: { cellWidth: 75 },
+        7: { cellWidth: 70 },
+        8: { cellWidth: 65, fontStyle: "bold" },
       },
       theme: "grid",
       didDrawPage: (data) => {
@@ -580,8 +595,22 @@ export default function Employees() {
         footer(data);
       },
       didParseCell: (data) => {
+        // Bold numeric totals
         if (data.section === "body" && [3,4,5,6,7].includes(data.column.index)) {
           data.cell.styles.fontStyle = "bold";
+        }
+        // Highlight whole row if any limit exceeded
+        if (data.section === "body" && exceededRowIndex[data.row.index]) {
+          data.cell.styles.fillColor = [255, 241, 240]; // soft red
+        }
+        // Flags coloring
+        if (data.section === "body" && data.column.index === 8) {
+          const v = String(data.cell.raw || "");
+          if (v.includes("GEN") || v.includes("NAM")) {
+            data.cell.styles.textColor = [220, 38, 38]; // red-600
+          } else {
+            data.cell.styles.textColor = [16, 185, 129]; // green-500
+          }
         }
       },
       alternateRowStyles: { fillColor: [248, 250, 252] },
@@ -672,7 +701,7 @@ export default function Employees() {
           Download Report
         </Button>
         <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
-          <MenuItem onClick={() => { setAnchorEl(null); downloadPDF(); }}>PDF (polished)</MenuItem>
+          <MenuItem onClick={() => { setAnchorEl(null); downloadPDF(); }}>PDF (HR-friendly)</MenuItem>
           <MenuItem onClick={() => { setAnchorEl(null); downloadCSV(); }}>CSV</MenuItem>
           <MenuItem onClick={() => { setAnchorEl(null); downloadXLS(); }}>Excel (.xls)</MenuItem>
         </Menu>
@@ -682,7 +711,7 @@ export default function Employees() {
         {mode === "day" ? `Range: ${day}` : `Range: ${from} → ${to}`} &nbsp; | &nbsp; {limitsNote} &nbsp; | &nbsp; TZ: Asia/Karachi
       </Typography>
 
-      {/* Table */}
+      {/* Table (UI unchanged) */}
       <TableContainer component={Paper} elevation={5} sx={{ borderRadius: "18px" }}>
         <Table>
           <TableHead>
@@ -713,3 +742,4 @@ export default function Employees() {
     </Box>
   );
 }
+
