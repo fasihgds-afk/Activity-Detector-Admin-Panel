@@ -92,11 +92,13 @@ function downloadXls(filename, headers, rows) {
       (r) =>
         `<tr>${r
           .map((c, i) => {
-            const base = "padding:8px;border:1px solid #e5e7eb;text-align:center";
+            const base = "padding:8px;border:1px solid #e5e7eb;text-align:center;vertical-align:middle";
             let bg = "";
             if (i === 8) bg = "background:#fef9c3;"; // Gen Exceed
             if (i === 9) bg = "background:#fee2e2;"; // Namaz Exceed
-            return `<td style="${base};${bg}">${String(c)}</td>`;
+            // allow wrapping for reason
+            const wrap = i === 10 || /reason/i.test(headers[i]) ? "white-space:normal;max-width:360px" : "white-space:nowrap";
+            return `<td style="${base};${bg};${wrap}">${String(c ?? "")}</td>`;
           })
           .join("")}</tr>`
     )
@@ -107,6 +109,7 @@ function downloadXls(filename, headers, rows) {
     <style>
       table{border-collapse:collapse;font-family:Segoe UI,Arial;font-size:12px}
       thead tr th{position:sticky;top:0}
+      td,th{word-break:break-word}
     </style>
     </head><body>
       <table>
@@ -349,7 +352,7 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
                               <Typography fontWeight={700}>General Break Time</Typography>
                               <Typography variant="h6" fontWeight={800}>
                                 {sums.general} min{" "}
-                                {generalExceeded ? `(Exceeded by ${sums.general - generalLimit})` : ""}
+                                {sums.general > generalLimit ? `(Exceeded by ${sums.general - generalLimit})` : ""}
                               </Typography>
                             </Card>
                           </Grid>
@@ -500,8 +503,36 @@ export default function Employees() {
     return rows;
   }
 
-  /* ---------- PDF: table-only, landscape, uses effective limits ---------- */
-  function downloadPDF() {
+  /* ---------- NEW: session-level rows (includes Reason) ---------- */
+  function collectSessionRows() {
+    const rows = [];
+    const elist = filtered.length ? filtered : [];
+    for (const emp of elist) {
+      const sessions = (emp.idle_sessions || []).filter((s) =>
+        inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start)
+      );
+      const shiftLabel = `${emp.shift_start ?? "-"} – ${emp.shift_end ?? "-"}`;
+      for (const s of sessions) {
+        rows.push([
+          emp.emp_id || emp.id || emp._id,           // 0
+          emp.name || "-",                           // 1
+          s.shiftDate || ymdInAsiaFromISO(s.idle_start) || "-", // 2
+          shiftLabel,                                // 3
+          s.category || "Uncategorized",             // 4
+          s.start_time_local || "-",                 // 5
+          s.end_time_local || "Ongoing",             // 6
+          (s.category === "AutoBreak"
+            ? Number(s.duration ?? 0).toFixed(1)
+            : s.duration ?? 0),                      // 7
+          s.reason || "-",                           // 8 (REASON)
+        ]);
+      }
+    }
+    return rows;
+  }
+
+  /* ---------- PDF: summary (existing) ---------- */
+  function downloadPDFSummary() {
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
 
     const pageW = doc.internal.pageSize.getWidth();
@@ -515,7 +546,6 @@ export default function Employees() {
     // Limits text
     const gDaily = (config.generalIdleLimit ?? 60);
     const nDaily = (config.namazLimit ?? 50);
-    const days = getMonthDays();
     const gCap = effectiveGeneralLimit();
     const nCap = effectiveNamazLimit();
     const limitsText =
@@ -547,7 +577,6 @@ export default function Employees() {
 
     const raw = collectReportRows(); // includes totals and exceeded (based on effective caps)
     const body = raw.map(r => [r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]]);
-
     const headers = ["Emp ID","Name","Dept","Total (m)","General (m)","Namaz (m)","Official (m)","Auto (m)"];
 
     autoTable(doc, {
@@ -571,16 +600,18 @@ export default function Employees() {
         }
         // Conditional colors based on effective caps
         if (data.section === "body") {
+          const gCapLocal = effectiveGeneralLimit();
+          const nCapLocal = effectiveNamazLimit();
           if (data.column.index === 4) { // General
             const v = Number(data.cell.raw || 0);
-            if (v > gCap) {
+            if (v > gCapLocal) {
               data.cell.styles.fillColor = [255, 237, 213]; // orange-100
               data.cell.styles.textColor = [194, 65, 12];   // orange-600
             }
           }
           if (data.column.index === 5) { // Namaz
             const v = Number(data.cell.raw || 0);
-            if (v > nCap) {
+            if (v > nCapLocal) {
               data.cell.styles.fillColor = [254, 226, 226]; // red-100
               data.cell.styles.textColor = [220, 38, 38];   // red-600
             }
@@ -595,10 +626,87 @@ export default function Employees() {
     });
 
     const fileLabel = mode === "day" ? day : `${from.replaceAll("-","")}_${to.replaceAll("-","")}`;
-    doc.save(`employee_idle_report_${fileLabel}.pdf`);
+    doc.save(`employee_idle_report_summary_${fileLabel}.pdf`);
   }
 
-  function downloadXLS() {
+  /* ---------- NEW: PDF Detailed (includes Reason) ---------- */
+  function downloadPDFDetailed() {
+    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
+
+    const pageW = doc.internal.pageSize.getWidth();
+    const brand = [31,41,55];
+    const accent = [16, 185, 129]; // teal accent for detailed
+
+    const label = mode === "day" ? day : `${from} → ${to}`;
+    const title = "Detailed Idle Sessions (with Reasons)";
+
+    const header = () => {
+      doc.setFillColor(brand[0], brand[1], brand[2]);
+      doc.rect(0, 0, pageW, 64, "F");
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(20);
+      doc.setTextColor("#ffffff");
+      doc.text("Employee Idle Report — Detailed", 40, 26);
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(12);
+      doc.text(`${title}`, 40, 46);
+
+      doc.setFontSize(10);
+      doc.text(`Range: ${label}   |   TZ: Asia/Karachi`, pageW - 40, 26, { align: "right" });
+    };
+
+    const headers = [
+      "Emp ID","Name","Shift Date","Shift","Category",
+      "Start","End","Duration (m)","Reason"
+    ];
+
+    const rows = collectSessionRows();
+
+    autoTable(doc, {
+      head: [headers],
+      body: rows,
+      margin: { left: 40, right: 40, top: 70, bottom: 32 },
+      styles: { fontSize: 9, cellPadding: 5, halign: "center", valign: "middle" },
+      headStyles: { fillColor: accent, textColor: 255 },
+      theme: "striped",
+      striped: true,
+      alternateRowStyles: { fillColor: [243, 244, 246] }, // slate-100
+      startY: 84,
+      didDrawPage: header,
+      columnStyles: {
+        1: { halign: "left", cellWidth: 120 },  // Name
+        2: { halign: "center", cellWidth: 86 }, // Shift Date
+        3: { halign: "center", cellWidth: 110 },// Shift
+        4: { halign: "center", cellWidth: 90 }, // Category
+        5: { halign: "center", cellWidth: 86 }, // Start
+        6: { halign: "center", cellWidth: 86 }, // End
+        7: { halign: "right",  cellWidth: 86 }, // Duration
+        8: { halign: "left",   cellWidth: 300 },// Reason (wide, wraps)
+      },
+      didParseCell: (data) => {
+        // Wrap long reasons
+        if (data.section === "body" && data.column.index === 8) {
+          data.cell.styles.overflow = "linebreak";
+        }
+        // Color by category for quick scan
+        if (data.section === "body" && data.column.index === 4) {
+          const cat = String(data.cell.raw || "");
+          if (cat === "Official") data.cell.styles.textColor = [37, 99, 235];     // blue-600
+          else if (cat === "General") data.cell.styles.textColor = [194, 65, 12]; // orange-600
+          else if (cat === "Namaz") data.cell.styles.textColor = [22, 163, 74];  // green-600
+          else if (cat === "AutoBreak") data.cell.styles.textColor = [220, 38, 38]; // red-600
+        }
+      },
+    });
+
+    const fileLabel = mode === "day" ? day : `${from.replaceAll("-","")}_${to.replaceAll("-","")}`;
+    doc.save(`employee_idle_report_detailed_${fileLabel}.pdf`);
+  }
+
+  /* ---------- XLS: summary (existing) ---------- */
+  function downloadXLSSummary() {
     const headers = [
       "Employee ID","Name","Department","Total Idle (min)","General (min)",
       "Namaz (min)","Official (min)","AutoBreak (min)",
@@ -606,7 +714,18 @@ export default function Employees() {
     ];
     const rows = collectReportRows(); // exceeded already uses effective caps
     const label = mode === "day" ? day : `${from}_to_${to}`;
-    downloadXls(`employee_idle_report_${label}.xls`, headers, rows);
+    downloadXls(`employee_idle_report_summary_${label}.xls`, headers, rows);
+  }
+
+  /* ---------- NEW: XLS Detailed (includes Reason) ---------- */
+  function downloadXLSDetailed() {
+    const headers = [
+      "Employee ID","Name","Shift Date","Shift","Category",
+      "Start Time","End Time","Duration (min)","Reason"
+    ];
+    const rows = collectSessionRows();
+    const label = mode === "day" ? day : `${from}_to_${to}`;
+    downloadXls(`employee_idle_report_detailed_${label}.xls`, headers, rows);
   }
 
   const gDaily = (config.generalIdleLimit ?? 60);
@@ -686,9 +805,10 @@ export default function Employees() {
           Download Report
         </Button>
         <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
-          <MenuItem onClick={() => { setAnchorEl(null); downloadPDF(); }}>PDF (table only)</MenuItem>
-          <MenuItem onClick={() => { setAnchorEl(null); downloadXLS(); }}>Excel (.xls)</MenuItem>
-          {/* CSV removed as requested */}
+          <MenuItem onClick={() => { setAnchorEl(null); downloadPDFSummary(); }}>PDF — Summary</MenuItem>
+          <MenuItem onClick={() => { setAnchorEl(null); downloadPDFDetailed(); }}>PDF — Detailed (with Reasons)</MenuItem>
+          <MenuItem onClick={() => { setAnchorEl(null); downloadXLSSummary(); }}>Excel — Summary (.xls)</MenuItem>
+          <MenuItem onClick={() => { setAnchorEl(null); downloadXLSDetailed(); }}>Excel — Detailed (with Reasons)</MenuItem>
         </Menu>
       </Box>
 
