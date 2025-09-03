@@ -10,9 +10,15 @@ import axios from "axios";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
+/* =========================
+   API base
+   ========================= */
 const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
+const ZONE = "Asia/Karachi";
 
-/* -------- helpers -------- */
+/* =========================
+   Small helpers
+   ========================= */
 const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
 
 function ymdInAsiaFromISO(iso) {
@@ -20,7 +26,7 @@ function ymdInAsiaFromISO(iso) {
   try {
     const d = new Date(iso);
     const fmt = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Karachi",
+      timeZone: ZONE,
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
@@ -34,13 +40,13 @@ function ymdInAsiaFromISO(iso) {
 // before 06:00 local → use previous day as “shift business day”
 function currentShiftYmd() {
   const fmtYmd = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Karachi",
+    timeZone: ZONE,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   });
   const hourFmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Karachi",
+    timeZone: ZONE,
     hour: "2-digit",
     hourCycle: "h23",
   });
@@ -73,7 +79,7 @@ function calcTotals(sessions) {
   for (const s of sessions) {
     const d = Number(s.duration) || 0;
     t.total += d;
-    if (s.category === "General")  t.general  += d;
+    if (s.category === "General")   t.general  += d;
     else if (s.category === "Namaz")    t.namaz    += d;
     else if (s.category === "Official") t.official += d;
     else if (s.category === "AutoBreak") t.autobreak += d;
@@ -81,7 +87,9 @@ function calcTotals(sessions) {
   return t;
 }
 
-/* -------- Excel maker (Summary with Reasons) -------- */
+/* =========================
+   Excel maker (Summary with Reasons-by-Category)
+   ========================= */
 function downloadXls(filename, headers, rows) {
   const headerHtml = headers
     .map((h) => `<th style="background:#1f2937;color:#fff;padding:10px 8px;border:1px solid #e5e7eb;text-align:center;font-weight:700">${h}</th>`)
@@ -93,8 +101,7 @@ function downloadXls(filename, headers, rows) {
         `<tr>${r
           .map((c, i) => {
             const base = "padding:8px;border:1px solid #e5e7eb;text-align:center;vertical-align:middle";
-            // let Reasons wrap nicely
-            const wrap = /reason/i.test(headers[i]) ? "white-space:normal;max-width:420px" : "white-space:nowrap";
+            const wrap = /reason/i.test(headers[i]) ? "white-space:normal;max-width:520px" : "white-space:nowrap";
             return `<td style="${base};${wrap}">${String(c ?? "")}</td>`;
           })
           .join("")}</tr>`
@@ -124,56 +131,76 @@ function downloadXls(filename, headers, rows) {
   document.body.removeChild(a);
 }
 
-/* ======== STATUS: Prefer DB, fallback to derived ======== */
+/* =========================
+   Status: prefer DB, fallback derived
+   ========================= */
 function karachiNowHM() {
-  const fmtH = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Karachi", hour: "2-digit", hourCycle: "h23" });
-  const fmtM = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Karachi", minute: "2-digit" });
+  const fmtH = new Intl.DateTimeFormat("en-GB", { timeZone: ZONE, hour: "2-digit", hourCycle: "h23" });
+  const fmtM = new Intl.DateTimeFormat("en-GB", { timeZone: ZONE, minute: "2-digit" });
   return { h: parseInt(fmtH.format(new Date()), 10), m: parseInt(fmtM.format(new Date()), 10) };
 }
-function hmToMinutes(hhmm) { const [h, m] = (hhmm||"").split(":").map(Number); return Number.isNaN(h)||Number.isNaN(m)?null:h*60+m; }
+function hmToMinutes(hhmm) {
+  const [h, m] = (hhmm || "").split(":").map(Number);
+  return Number.isNaN(h) || Number.isNaN(m) ? null : h * 60 + m;
+}
 function isInShiftNow(shiftStart, shiftEnd) {
-  const {h,m}=karachiNowHM(); const now=h*60+m; const s=hmToMinutes(shiftStart); const e=hmToMinutes(shiftEnd);
-  if(s==null||e==null) return false; if(e>=s) return now>=s&&now<=e; return now>=s||now<=e; // cross-midnight
+  const { h, m } = karachiNowHM();
+  const now = h * 60 + m;
+  const s = hmToMinutes(shiftStart);
+  const e = hmToMinutes(shiftEnd);
+  if (s == null || e == null) return false;
+  if (e >= s) return now >= s && now <= e;
+  return now >= s || now <= e; // crosses midnight
 }
 
-function computeFallbackStatus(emp, { mode, day, from, to }) {
+// DB-based → if Idle and ongoing session exists, show "On Break — {Category}"
+function computeDbAwareStatus(emp, ctx) {
+  const raw = (emp?.latest_status || "").toString().trim().toLowerCase();
+  const ongoing = (Array.isArray(emp?.idle_sessions) ? emp.idle_sessions : [])
+    .filter((s) => inPickedRange(s.shiftDate, ctx.mode, ctx.day, ctx.from, ctx.to, s.idle_start))
+    .find((s) => !s.end_time_local || s.end_time_local === "Ongoing");
+  const onCat = ongoing?.category;
+
+  if (raw === "active" || raw === "online" || raw === "working") {
+    return { label: "Active", color: "success" };
+  }
+  if (raw === "idle") {
+    if (onCat) {
+      const color =
+        onCat === "Official" ? "info" :
+        onCat === "Namaz"    ? "success" :
+        onCat === "AutoBreak"? "error"   :
+                               "warning";
+      return { label: `On Break — ${onCat}`, color };
+    }
+    return { label: "Idle", color: "warning" };
+  }
+  if (raw === "break" || raw === "on break" || raw === "paused") {
+    return { label: onCat ? `On Break — ${onCat}` : "On Break", color: "warning" };
+  }
+  if (raw === "offline") return { label: "Offline", color: "default" };
+  if (raw === "unknown" || !raw) return null; // let fallback derive
+  return { label: emp.latest_status, color: "default" }; // any other custom statuses
+}
+
+function computeFallbackStatus(emp, ctx) {
   const inShift = isInShiftNow(emp?.shift_start, emp?.shift_end);
   if (!inShift) return { label: "Off Shift", color: "default" };
-  const list = Array.isArray(emp?.idle_sessions) ? emp.idle_sessions : [];
-  const ongoing = list
-    .filter((s)=>inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start))
-    .some((s)=>!s.end_time_local);
+  const ongoing = (Array.isArray(emp?.idle_sessions) ? emp.idle_sessions : [])
+    .filter((s) => inPickedRange(s.shiftDate, ctx.mode, ctx.day, ctx.from, ctx.to, s.idle_start))
+    .some((s) => !s.end_time_local || s.end_time_local === "Ongoing");
   if (ongoing) return { label: "On Break", color: "warning" };
   return { label: "Active", color: "success" };
 }
 
-function mapDbStatusToChip(statusRaw, categoryRaw) {
-  const s = (statusRaw || "").toString().trim().toLowerCase();
-  const cat = (categoryRaw || "").toString().trim();
-  // Normalize common DB values
-  if (s === "active" || s === "online" || s === "working") return { label: "Active", color: "success" };
-  if (s === "idle" || s === "away") return { label: "Idle", color: "warning" };
-  if (s === "on break" || s === "break" || s === "paused") {
-    return { label: cat ? `On Break — ${cat}` : "On Break", color: cat === "Official" ? "info" : cat === "Namaz" ? "success" : cat === "AutoBreak" ? "error" : "warning" };
-  }
-  if (s === "offline") return { label: "Offline", color: "default" };
-  if (s === "off shift" || s === "offshift") return { label: "Off Shift", color: "default" };
-  // unknown -> let fallback handle later
-  return null;
-}
-
-function getStatusForEmp(emp, context) {
-  // Prefer DB fields if available
-  const dbStatus = mapDbStatusToChip(emp?.latest_status ?? emp?.status, emp?.current_break_category);
-  if (dbStatus) return dbStatus;
-  // Fallback logic if DB not providing/unknown
-  return computeFallbackStatus(emp, context);
+function getStatusForEmp(emp, ctx) {
+  return computeDbAwareStatus(emp, ctx) || computeFallbackStatus(emp, ctx);
 }
 
 /* =========================
-   UI Row
+   Employee row
    ========================= */
-function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
+function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, categoryColors }) {
   const theme = useTheme();
   const [open, setOpen] = useState(false);
   const all = Array.isArray(emp.idle_sessions) ? emp.idle_sessions : [];
@@ -185,7 +212,6 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
       const bt = b.idle_start ? new Date(b.idle_start).getTime() : 0;
       return at - bt;
     });
-
     for (const s of sorted) {
       if (!inPickedRange(s.shiftDate, dayMode, pickedDay, from, to, s.idle_start)) continue;
       const label = `${s.shiftDate || ymdInAsiaFromISO(s.idle_start) || "Unknown"} — ${emp.shift_start} – ${emp.shift_end}`;
@@ -195,7 +221,6 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
     return map;
   }, [all, emp.shift_start, emp.shift_end, dayMode, pickedDay, from, to]);
 
-  // theme-aware helper colors
   const trackBorder = alpha(theme.palette.divider, 0.4);
   const cardBase = (col, opLight = 0.12, opDark = 0.18) =>
     alpha(col, theme.palette.mode === "dark" ? opDark : opLight);
@@ -311,11 +336,12 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
                                     fontWeight: 600,
                                     color: "#fff",
                                     bgcolor:
-                                      s.category === "Official"   ? theme.palette.info.main :
-                                      s.category === "General"    ? theme.palette.warning.main :
-                                      s.category === "Namaz"      ? theme.palette.success.main :
-                                      s.category === "AutoBreak"  ? theme.palette.error.main :
-                                                                    theme.palette.grey[600],
+                                      (s.category && categoryColors?.[s.category]) ||
+                                      (s.category === "Official"   ? theme.palette.info.main :
+                                       s.category === "General"    ? theme.palette.warning.main :
+                                       s.category === "Namaz"      ? theme.palette.success.main :
+                                       s.category === "AutoBreak"  ? theme.palette.error.main :
+                                                                     theme.palette.grey[600]),
                                   }}
                                 />
                               </TableCell>
@@ -381,32 +407,40 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit }) {
    ========================= */
 export default function Employees() {
   const theme = useTheme();
+
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
-  const [config, setConfig] = useState({ generalIdleLimit: 60, namazLimit: 50 });
+  const [config, setConfig] = useState({
+    generalIdleLimit: 60,
+    namazLimit: 50,
+    categoryColors: {},
+  });
   const [employeeFilter, setEmployeeFilter] = useState("all");
 
   // Modes
   const [mode, setMode] = useState("day"); // 'day' | 'month' | 'range'
-  const [day, setDay]   = useState(currentShiftYmd());
+  const [day, setDay] = useState(currentShiftYmd());
   const [month, setMonth] = useState(() => {
     const [y, m] = currentShiftYmd().split("-");
     return `${y}-${m}`;
   });
   const [from, setFrom] = useState(currentShiftYmd());
-  const [to, setTo]     = useState(currentShiftYmd());
+  const [to, setTo] = useState(currentShiftYmd());
   const [autoShiftDay, setAutoShiftDay] = useState(true);
 
   const [anchorEl, setAnchorEl] = useState(null);
   const openMenu = Boolean(anchorEl);
 
+  /* ----- API fetch ----- */
   const fetchEmployees = async () => {
     try {
       const res = await axios.get(`${API}/employees`, { timeout: 20000 });
       const arr = Array.isArray(res.data) ? res.data : res.data.employees || [];
       setEmployees(arr);
-      if (res.data?.settings?.general_idle_limit) {
-        setConfig((c) => ({ ...c, generalIdleLimit: res.data.settings.general_idle_limit }));
+      // if server includes settings.general_idle_limit, honor it
+      const gl = res.data?.settings?.general_idle_limit;
+      if (typeof gl === "number") {
+        setConfig((c) => ({ ...c, generalIdleLimit: gl }));
       }
     } catch (e) {
       console.error("Error fetching employees:", e);
@@ -416,8 +450,11 @@ export default function Employees() {
   const fetchConfig = async () => {
     try {
       const res = await axios.get(`${API}/config`, { timeout: 15000 });
+      // server returns { generalIdleLimit, namazLimit, categoryColors }
       setConfig((c) => ({ ...c, ...(res.data || {}) }));
-    } catch {}
+    } catch (e) {
+      console.warn("Config fetch failed (using defaults).", e?.message || e);
+    }
   };
 
   useEffect(() => {
@@ -464,7 +501,7 @@ export default function Employees() {
     return list;
   }, [employees, employeeFilter, search]);
 
-  /* ---------- month/day caps ---------- */
+  /* ---------- Effective limits ---------- */
   function getMonthDays() {
     if (mode !== "month") return 1;
     const [yy, mm] = month.split("-").map(Number);
@@ -479,22 +516,36 @@ export default function Employees() {
     return mode === "month" ? daily * getMonthDays() : daily;
   }
 
-  /* ---------- Exports: Summary + Reasons ---------- */
-  function summarizeReasons(sessions) {
-    // unique, order-preserving; cap long cells
-    const seen = new Set();
-    const list = [];
+  /* ---------- Exports: Summary + Reasons (by Category) ---------- */
+  function summarizeReasonsByCategory(sessions) {
+    const ORDER = ["General", "Namaz", "Official", "AutoBreak"];
+    const OTHER = "Other";
+    const buckets = new Map(ORDER.map((c) => [c, []]));
+    const seenPerCat = new Map(ORDER.map((c) => [c, new Set()]));
+    if (!buckets.has(OTHER)) buckets.set(OTHER, []);
+    if (!seenPerCat.has(OTHER)) seenPerCat.set(OTHER, new Set());
+
     for (const s of sessions) {
-      const r = (s.reason || "").trim();
-      if (!r) continue;
-      const key = r.toLowerCase();
+      const cat = ORDER.includes(s?.category) ? s.category : OTHER;
+      const reason = (s?.reason || "").trim();
+      if (!reason) continue;
+      const seen = seenPerCat.get(cat);
+      const key = reason.toLowerCase();
       if (!seen.has(key)) {
         seen.add(key);
-        list.push(r);
+        buckets.get(cat).push(reason);
       }
-      if (list.join(" | ").length > 350) break;
     }
-    return list.length ? list.join(" | ") : "-";
+
+    const parts = [];
+    const makeBlock = (cat, arr) => (arr && arr.length ? `${cat}: ${arr.join(" | ")}` : null);
+
+    for (const cat of ORDER.concat([OTHER])) {
+      const block = makeBlock(cat, buckets.get(cat));
+      if (block) parts.push(block);
+      if (parts.join(" • ").length > 500) break; // cap cell size
+    }
+    return parts.length ? parts.join(" • ") : "-";
   }
 
   function collectReportRowsWithReasons() {
@@ -514,7 +565,7 @@ export default function Employees() {
         sums.namaz,
         sums.official,
         Number(sums.autobreak).toFixed(1),
-        summarizeReasons(sessions), // Reasons
+        summarizeReasonsByCategory(sessions), // grouped reasons
       ]);
     }
     return rows;
@@ -529,7 +580,9 @@ export default function Employees() {
     const accent = [99, 102, 241];
 
     const label = mode === "day" ? day : `${from} → ${to}`;
-    const title = mode === "day" ? "Daily Idle Report" : (mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report");
+    const title =
+      mode === "day" ? "Daily Idle Report" :
+      mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report";
 
     const gDaily = (config.generalIdleLimit ?? 60);
     const nDaily = (config.namazLimit ?? 50);
@@ -554,7 +607,7 @@ export default function Employees() {
       doc.text(title, 40, 46);
 
       doc.setFontSize(10);
-      doc.text(`Range: ${label}   |   TZ: Asia/Karachi   |   ${limitsText}`, pageW - 40, 26, { align: "right" });
+      doc.text(`Range: ${label}   |   TZ: ${ZONE}   |   ${limitsText}`, pageW - 40, 26, { align: "right" });
     };
     const footer = (data) => {
       doc.setFontSize(9);
@@ -563,7 +616,7 @@ export default function Employees() {
     };
 
     const body = collectReportRowsWithReasons();
-    const headers = ["Emp ID","Name","Dept","Total (m)","General (m)","Namaz (m)","Official (m)","Auto (m)","Reasons"];
+    const headers = ["Emp ID","Name","Dept","Total (m)","General (m)","Namaz (m)","Official (m)","Auto (m)","Reasons (by Category)"];
 
     autoTable(doc, {
       head: [headers],
@@ -578,7 +631,7 @@ export default function Employees() {
       columnStyles: {
         1: { halign: "left", cellWidth: 120 }, // Name
         2: { halign: "left", cellWidth: 110 }, // Dept
-        8: { halign: "left", cellWidth: 360 }, // Reasons
+        8: { halign: "left", cellWidth: 460 }, // wider Reasons
       },
       didParseCell: (data) => {
         // wrap long reasons
@@ -591,15 +644,13 @@ export default function Employees() {
         }
         // highlight if exceeds cap
         if (data.section === "body") {
-          const gCapLocal = gCap;
-          const nCapLocal = nCap;
           if (data.column.index === 4) {
             const v = Number(data.cell.raw || 0);
-            if (v > gCapLocal) { data.cell.styles.fillColor = [255,237,213]; data.cell.styles.textColor = [194,65,12]; }
+            if (v > gCap) { data.cell.styles.fillColor = [255,237,213]; data.cell.styles.textColor = [194,65,12]; }
           }
           if (data.column.index === 5) {
             const v = Number(data.cell.raw || 0);
-            if (v > nCapLocal) { data.cell.styles.fillColor = [254,226,226]; data.cell.styles.textColor = [220,38,38]; }
+            if (v > nCap) { data.cell.styles.fillColor = [254,226,226]; data.cell.styles.textColor = [220,38,38]; }
           }
         }
       },
@@ -614,13 +665,14 @@ export default function Employees() {
   function downloadXLS() {
     const headers = [
       "Employee ID","Name","Department","Total Idle (min)","General (min)",
-      "Namaz (min)","Official (min)","AutoBreak (min)","Reasons"
+      "Namaz (min)","Official (min)","AutoBreak (min)","Reasons (by Category)"
     ];
     const rows = collectReportRowsWithReasons();
     const label = mode === "day" ? day : `${from}_to_${to}`;
     downloadXls(`employee_idle_report_${label}.xls`, headers, rows);
   }
 
+  /* ---------- UI bits ---------- */
   const gDaily = (config.generalIdleLimit ?? 60);
   const nDaily = (config.namazLimit ?? 50);
   const note =
@@ -628,8 +680,7 @@ export default function Employees() {
       ? `General: ${gDaily}m/day (×${new Date(Number(month.split("-")[0]), Number(month.split("-")[1]), 0).getDate()} days) • Namaz: ${nDaily}m/day`
       : `General: ${gDaily}m/day • Namaz: ${nDaily}m/day`;
 
-  // theme-aware header gradient
-  const headerGradient = `linear-gradient(90deg, ${theme.palette.primary.main}, ${theme.palette.secondary?.main || theme.palette.success.main})`;
+  const headerGradient = `linear-gradient(90deg, ${theme.palette.primary.main}, ${theme.palette.success.main})`;
 
   return (
     <Box p={3}>
@@ -704,7 +755,7 @@ export default function Employees() {
       </Box>
 
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
-        {mode === "day" ? `Range: ${day}` : `Range: ${from} → ${to}`} &nbsp; | &nbsp; {note} &nbsp; | &nbsp; TZ: Asia/Karachi
+        {mode === "day" ? `Range: ${day}` : `Range: ${from} → ${to}`} &nbsp; | &nbsp; {note} &nbsp; | &nbsp; TZ: {ZONE}
       </Typography>
 
       {/* Table (UI) */}
@@ -729,6 +780,7 @@ export default function Employees() {
                 from={from}
                 to={to}
                 generalLimit={effectiveGeneralLimit()}
+                categoryColors={config.categoryColors}
               />
             ))}
           </TableBody>
@@ -737,3 +789,4 @@ export default function Employees() {
     </Box>
   );
 }
+
