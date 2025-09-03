@@ -20,6 +20,8 @@ const ZONE = "Asia/Karachi";
    Small helpers
    ========================= */
 const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
+const cleanName = (s) => (s || "").replace(/\s+/g, " ").trim();
+const slugName  = (s) => cleanName(s).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "employee";
 
 function ymdInAsiaFromISO(iso) {
   if (!iso) return null;
@@ -85,6 +87,33 @@ function calcTotals(sessions) {
     else if (s.category === "AutoBreak") t.autobreak += d;
   }
   return t;
+}
+
+/* ---------- misc helpers for PDF math/format ---------- */
+const toH1 = (min) => ((min || 0) / 60).toFixed(1);
+
+/* Parse shift strings like "6:00 PM" / "09:00" → minutes */
+function parseShiftToMinutes(str) {
+  if (!str) return null;
+  const s = String(str).trim().toUpperCase();
+  // has AM/PM?
+  const parts = s.split(/\s+/);
+  if (parts.length === 2 && (parts[1] === "AM" || parts[1] === "PM")) {
+    let [h, m] = parts[0].split(":").map(Number);
+    if (parts[1] === "PM" && h < 12) h += 12;
+    if (parts[1] === "AM" && h === 12) h = 0;
+    return h * 60 + (m || 0);
+  }
+  // 24h "HH:mm"
+  const [h, m] = s.split(":").map(Number);
+  if (Number.isFinite(h) && Number.isFinite(m)) return h * 60 + m;
+  return null;
+}
+function shiftSpanMinutes(shiftStart, shiftEnd) {
+  const s = parseShiftToMinutes(shiftStart);
+  const e = parseShiftToMinutes(shiftEnd);
+  if (s == null || e == null) return 9 * 60; // default 9h if malformed
+  return e >= s ? (e - s) : (24 * 60 - s + e); // handle cross midnight
 }
 
 /* =========================
@@ -173,15 +202,14 @@ function computeDbAwareStatus(emp, ctx) {
                                "warning";
       return { label: `On Break — ${onCat}`, color };
     }
-    // ⬇️ IMPORTANT: if DB says "Idle" but no ongoing idle, let fallback decide
-    return null;
+    return null; // let fallback decide
   }
   if (raw === "break" || raw === "on break" || raw === "paused") {
     return { label: onCat ? `On Break — ${onCat}` : "On Break", color: "warning" };
   }
   if (raw === "offline") return { label: "Offline", color: "default" };
-  if (raw === "unknown" || !raw) return null; // let fallback derive
-  return { label: emp.latest_status, color: "default" }; // any other custom statuses
+  if (raw === "unknown" || !raw) return null;
+  return { label: emp.latest_status, color: "default" };
 }
 
 function computeFallbackStatus(emp, ctx) {
@@ -201,9 +229,9 @@ function getStatusForEmp(emp, ctx) {
 /* =========================
    Employee row
    ========================= */
-function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, categoryColors }) {
+function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, categoryColors, defaultOpen = false }) {
   const theme = useTheme();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(Boolean(defaultOpen));
   const all = Array.isArray(emp.idle_sessions) ? emp.idle_sessions : [];
 
   const grouped = useMemo(() => {
@@ -521,16 +549,105 @@ export default function Employees() {
     const [yy, mm] = month.split("-").map(Number);
     return new Date(yy, mm, 0).getDate();
   }
-  function effectiveGeneralLimit() {
+  function effectiveGeneralLimit(daysOverride) {
     const daily = (config.generalIdleLimit ?? 60);
-    return mode === "month" ? daily * getMonthDays() : daily;
+    const mult = mode === "month" ? (daysOverride ?? getMonthDays()) : 1;
+    return daily * mult;
   }
-  function effectiveNamazLimit() {
+  function effectiveNamazLimit(daysOverride) {
     const daily = (config.namazLimit ?? 50);
-    return mode === "month" ? daily * getMonthDays() : daily;
+    const mult = mode === "month" ? (daysOverride ?? getMonthDays()) : 1;
+    return daily * mult;
   }
 
-  /* ---------- Exports: Summary + Reasons (by Category) ---------- */
+  /* ---------- helpers for reports ---------- */
+  const sessionsForEmp = (emp) =>
+    (emp.idle_sessions || []).filter((s) =>
+      inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start)
+    );
+  const uniqueDays = (sessions) => {
+    const set = new Set();
+    for (const s of sessions) {
+      const d = s.shiftDate || ymdInAsiaFromISO(s.idle_start);
+      if (d) set.add(d);
+    }
+    return set;
+  };
+
+  /* ---------- DAILY DETAIL (Selected Employee) ---------- */
+  function downloadPDFDailyDetailSelected() {
+    if (employeeFilter === "all" || !filtered.length || mode !== "day") return;
+
+    const emp = filtered[0]; // only one because filtered by exact id above
+    const empName = cleanName(emp.name);
+    const sessions = sessionsForEmp(emp).sort((a,b) =>
+      (new Date(a.idle_start||0)) - (new Date(b.idle_start||0))
+    );
+    const sums = calcTotals(sessions);
+
+    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
+    const pageW = doc.internal.pageSize.getWidth();
+
+    const brand = [59,130,246];
+    // header — simple name (no id)
+    doc.setFillColor(31,41,55);
+    doc.rect(0,0,pageW,64,"F");
+    doc.setFont("helvetica","bold"); doc.setFontSize(20); doc.setTextColor("#fff");
+    doc.text(`Daily Report — ${empName}`, 40, 26);
+    doc.setFont("helvetica","normal"); doc.setFontSize(11);
+    doc.text(`Dept: ${emp.department || "-"}   Shift: ${emp.shift_start} – ${emp.shift_end}   Day: ${day}   TZ: ${ZONE}`, 40, 46);
+
+    // group chip
+    doc.setFillColor(...brand);
+    doc.roundedRect(40,84,340,26,6,6,"F");
+    doc.setFont("helvetica","bold"); doc.setFontSize(12); doc.setTextColor("#fff");
+    doc.text(`${day} — ${emp.shift_start} – ${emp.shift_end}`, 50, 101);
+
+    // table
+    const body = sessions.map(s => [
+      s.category || "-",
+      s.start_time_local || "-",
+      s.end_time_local || "Ongoing",
+      s.reason || "-",
+      s.category === "AutoBreak" ? Number(s.duration||0).toFixed(1) : (s.duration||0)
+    ]);
+
+    autoTable(doc, {
+      head: [["Category","Start Time","End Time","Reason","Duration (min)"]],
+      body,
+      startY: 120,
+      margin: { left: 40, right: 40 },
+      styles: { fontSize: 10, cellPadding: 6, halign: "center", valign: "middle" },
+      columnStyles: { 0:{cellWidth:90}, 3:{halign:"left", cellWidth:420, overflow:"linebreak"} },
+      headStyles: { fillColor: brand, textColor: 255, halign: "center" },
+      theme: "striped",
+      alternateRowStyles: { fillColor: [248,250,252] },
+    });
+
+    // totals cards
+    const y = doc.lastAutoTable.finalY + 18;
+    const boxW = 190, boxH = 68, gap = 16;
+    const blocks = [
+      ["Total Time", `${Number(sums.total).toFixed(1)} min`, [234,179,8]],
+      ["Official Break Time", `${sums.official} min`, [59,130,246]],
+      ["Namaz Break Time", `${sums.namaz} min`, [16,185,129]],
+      ["General Break Time", `${sums.general} min`, sums.general > effectiveGeneralLimit() ? [239,68,68] : [107,114,128]],
+    ];
+    blocks.forEach((b, i) => {
+      const x = 40 + i * (boxW + gap);
+      doc.setDrawColor(229,231,235);
+      doc.setFillColor(247,249,251);
+      doc.roundedRect(x,y,boxW,boxH,8,8,"FD");
+      doc.setFont("helvetica","bold"); doc.setFontSize(11); doc.setTextColor(...b[2]);
+      doc.text(b[0], x+12, y+22);
+      doc.setFontSize(16); doc.setTextColor(17,24,39);
+      doc.text(b[1], x+12, y+46);
+    });
+
+    doc.save(`daily_${slugName(empName)}_${day}.pdf`);
+  }
+
+  /* ---------- DAILY SUMMARY (All Employees) ---------- */
   function summarizeReasonsByCategory(sessions) {
     const ORDER = ["General", "Namaz", "Official", "AutoBreak"];
     const OTHER = "Other";
@@ -553,11 +670,10 @@ export default function Employees() {
 
     const parts = [];
     const makeBlock = (cat, arr) => (arr && arr.length ? `${cat}: ${arr.join(" | ")}` : null);
-
     for (const cat of ORDER.concat([OTHER])) {
       const block = makeBlock(cat, buckets.get(cat));
       if (block) parts.push(block);
-      if (parts.join(" • ").length > 500) break; // cap cell size
+      if (parts.join(" • ").length > 500) break;
     }
     return parts.length ? parts.join(" • ") : "-";
   }
@@ -566,9 +682,7 @@ export default function Employees() {
     const rows = [];
     const elist = filtered.length ? filtered : [];
     for (const emp of elist) {
-      const sessions = (emp.idle_sessions || []).filter((s) =>
-        inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start)
-      );
+      const sessions = sessionsForEmp(emp);
       const sums = calcTotals(sessions);
       rows.push([
         emp.emp_id || emp.id || emp._id,
@@ -579,13 +693,13 @@ export default function Employees() {
         sums.namaz,
         sums.official,
         Number(sums.autobreak).toFixed(1),
-        summarizeReasonsByCategory(sessions), // grouped reasons
+        summarizeReasonsByCategory(sessions),
       ]);
     }
     return rows;
   }
 
-  function downloadPDF() {
+  function downloadPDFDailySummaryAll() {
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
 
     const pageW = doc.internal.pageSize.getWidth();
@@ -632,7 +746,7 @@ export default function Employees() {
     const body = collectReportRowsWithReasons();
     const headers = [
       "Emp ID","Name","Dept","Total (m)","General (m)","Namaz (m)","Official (m)","Auto (m)",
-      "Reasons (by\nCategory)" // header wraps to 2 lines
+      "Reasons (by\nCategory)"
     ];
 
     autoTable(doc, {
@@ -646,30 +760,9 @@ export default function Employees() {
       striped: true,
       alternateRowStyles: { fillColor: [248, 250, 252] },
       columnStyles: {
-        1: { halign: "left", cellWidth: 120 }, // Name
-        2: { halign: "left", cellWidth: 110 }, // Dept
-        8: { halign: "left", cellWidth: 460, overflow: "linebreak" }, // wider + wrap Reasons
-      },
-      didParseCell: (data) => {
-        // body reasons wrap (safety)
-        if (data.section === "body" && data.column.index === 8) {
-          data.cell.styles.overflow = "linebreak";
-        }
-        // bold numeric columns
-        if (data.section === "body" && [3,4,5,6,7].includes(data.column.index)) {
-          data.cell.styles.fontStyle = "bold";
-        }
-        // highlight if exceeds cap
-        if (data.section === "body") {
-          if (data.column.index === 4) {
-            const v = Number(data.cell.raw || 0);
-            if (v > gCap) { data.cell.styles.fillColor = [255,237,213]; data.cell.styles.textColor = [194,65,12]; }
-          }
-          if (data.column.index === 5) {
-            const v = Number(data.cell.raw || 0);
-            if (v > nCap) { data.cell.styles.fillColor = [254,226,226]; data.cell.styles.textColor = [220,38,38]; }
-          }
-        }
+        1: { halign: "left", cellWidth: 120 },
+        2: { halign: "left", cellWidth: 110 },
+        8: { halign: "left", cellWidth: 460, overflow: "linebreak" },
       },
       didDrawPage: (data) => { header(data); footer(data); },
       startY: 84,
@@ -679,6 +772,90 @@ export default function Employees() {
     doc.save(`employee_idle_report_${fileLabel}.pdf`);
   }
 
+  /* ---------- MONTHLY TOTALS (All or Selected) ---------- */
+  function collectMonthlyRows(employeesList) {
+    const rows = [];
+    for (const emp of employeesList) {
+      const sessions = sessionsForEmp(emp);
+      const sums = calcTotals(sessions);
+
+      const days = uniqueDays(sessions).size || getMonthDays(); // or force getMonthDays() if you prefer
+      const shiftSpan = shiftSpanMinutes(emp.shift_start, emp.shift_end);
+
+      // Working time approximation: scheduled span × active days − all idle/breaks
+      const workMin = Math.max(0, shiftSpan * days - (sums.total));
+
+      const gCap = effectiveGeneralLimit(days);
+      const nCap = effectiveNamazLimit(days);
+
+      rows.push([
+        emp.emp_id || emp.id || emp._id,
+        emp.name || "-",
+        emp.department || "-",
+        toH1(workMin),                   // Working Hours (h)
+        toH1(sums.general),
+        toH1(sums.namaz),
+        toH1(sums.official),
+        toH1(sums.autobreak),
+        sums.general > gCap ? `+${toH1(sums.general - gCap)}h` : "-",
+        sums.namaz  > nCap ? `+${toH1(sums.namaz  - nCap)}h`   : "-",
+        days
+      ]);
+    }
+    return rows;
+  }
+
+  function downloadPDFMonthlyTotals(allOrSelected = "all") {
+    if (mode !== "month") return;
+    const list = allOrSelected === "all" ? filtered : (employeeFilter === "all" ? [] : filtered.slice(0,1));
+    if (!list.length) return;
+
+    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
+    const pageW = doc.internal.pageSize.getWidth();
+    const accent = [16,185,129];
+    const header = () => {
+      doc.setFillColor(31,41,55);
+      doc.rect(0, 0, pageW, 64, "F");
+      doc.setFont("helvetica","bold"); doc.setFontSize(20); doc.setTextColor("#fff");
+      doc.text(`Monthly Totals — ${allOrSelected === "all" ? "All Employees" : cleanName(list[0].name)}`, 40, 26);
+      doc.setFont("helvetica","normal"); doc.setFontSize(11);
+      doc.text(`Range: ${from} → ${to}   |   Caps/day: General ${config.generalIdleLimit ?? 60}m, Namaz ${config.namazLimit ?? 50}m   |   TZ: ${ZONE}`, 40, 46);
+    };
+    header();
+
+    const body = collectMonthlyRows(list);
+    const headers = ["Emp ID","Name","Dept","Working (h)","General (h)","Namaz (h)","Official (h)","Auto (h)","Gen Exceed","Namaz Exceed","Active Days"];
+
+    autoTable(doc, {
+      head: [headers],
+      body,
+      margin: { left: 40, right: 40, top: 70 },
+      styles: { fontSize: 10, cellPadding: 6, halign: "center", valign: "middle" },
+      headStyles: { fillColor: accent, textColor: 255, halign: "center", fontStyle: "bold" },
+      columnStyles: {
+        1: { halign: "left", cellWidth: 140 },
+        2: { halign: "left", cellWidth: 120 },
+      },
+      didParseCell: (data) => {
+        // highlight exceed cells
+        if (data.section === "body" && (data.column.index === 8 || data.column.index === 9)) {
+          const val = String(data.cell.raw || "-");
+          if (val.startsWith("+")) {
+            data.cell.styles.fillColor = [254,226,226];
+            data.cell.styles.textColor = [220,38,38];
+            data.cell.styles.fontStyle = "bold";
+          }
+        }
+      }
+    });
+
+    const fname = allOrSelected === "all"
+      ? `monthly_totals_${from.replaceAll("-","")}_${to.replaceAll("-","")}.pdf`
+      : `monthly_${slugName(list[0].name)}_${from.replaceAll("-","")}_${to.replaceAll("-","")}.pdf`;
+    doc.save(fname);
+  }
+
+  /* ---------- MENU + QUICK DOWNLOAD ---------- */
   function downloadXLS() {
     const headers = [
       "Employee ID","Name","Department","Total Idle (min)","General (min)",
@@ -689,14 +866,29 @@ export default function Employees() {
     downloadXls(`employee_idle_report_${label}.xls`, headers, rows);
   }
 
+  const isSingleSelected = employeeFilter !== "all" && filtered.length === 1;
+  const selectedName = isSingleSelected ? cleanName(filtered[0]?.name) : "";
+  const quickLabel =
+    mode === "day"
+      ? (isSingleSelected ? `Daily — ${selectedName}` : "Daily — All Employees")
+      : mode === "month"
+      ? (isSingleSelected ? `Monthly — ${selectedName}` : "Monthly — All Employees")
+      : (isSingleSelected ? `Range — ${selectedName}` : "Range — All Employees");
+
+  function handleQuickDownload() {
+    if (mode === "day") {
+      return isSingleSelected ? downloadPDFDailyDetailSelected() : downloadPDFDailySummaryAll();
+    }
+    if (mode === "month") {
+      return isSingleSelected ? downloadPDFMonthlyTotals("one") : downloadPDFMonthlyTotals("all");
+    }
+    // range → reuse the daily summary layout
+    return downloadPDFDailySummaryAll();
+  }
+
   /* ---------- UI bits ---------- */
   const gDaily = (config.generalIdleLimit ?? 60);
   const nDaily = (config.namazLimit ?? 50);
-  const note =
-    mode === "month"
-      ? `General: ${gDaily}m/day (×${new Date(Number(month.split("-")[0]), Number(month.split("-")[1]), 0).getDate()} days) • Namaz: ${nDaily}m/day`
-      : `General: ${gDaily}m/day • Namaz: ${nDaily}m/day`;
-
   const headerGradient = `linear-gradient(90deg, ${theme.palette.primary.main}, ${theme.palette.success.main})`;
 
   return (
@@ -762,17 +954,56 @@ export default function Employees() {
 
         <Box flex={1} />
 
-        <Button variant="contained" startIcon={<Download />} onClick={(e) => setAnchorEl(e.currentTarget)}>
-          Download Report
+        <Button
+          variant="contained"
+          startIcon={<Download />}
+          onClick={(e) => { handleQuickDownload(); setAnchorEl(e.currentTarget); }}
+        >
+          {isSingleSelected ? `Download: ${selectedName}` : "Download Report"}
         </Button>
         <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
-          <MenuItem onClick={() => { setAnchorEl(null); downloadPDF(); }}>PDF — Summary (with Reasons)</MenuItem>
-          <MenuItem onClick={() => { setAnchorEl(null); downloadXLS(); }}>Excel — Summary (with Reasons)</MenuItem>
+          {/* Quick */}
+          <MenuItem onClick={() => { setAnchorEl(null); handleQuickDownload(); }}>
+            Quick — {quickLabel}
+          </MenuItem>
+
+          {/* Daily */}
+          <MenuItem onClick={() => { setAnchorEl(null); downloadPDFDailySummaryAll(); }}>
+            Daily — All Employees
+          </MenuItem>
+          <MenuItem
+            disabled={!(mode === "day" && isSingleSelected)}
+            onClick={() => { setAnchorEl(null); downloadPDFDailyDetailSelected(); }}
+          >
+            Daily — {selectedName || "Selected Employee"}
+          </MenuItem>
+
+          {/* Monthly */}
+          <MenuItem
+            disabled={mode !== "month"}
+            onClick={() => { setAnchorEl(null); downloadPDFMonthlyTotals("all"); }}
+          >
+            Monthly — All Employees
+          </MenuItem>
+          <MenuItem
+            disabled={!(mode === "month" && isSingleSelected)}
+            onClick={() => { setAnchorEl(null); downloadPDFMonthlyTotals("one"); }}
+          >
+            Monthly — {selectedName || "Selected Employee"}
+          </MenuItem>
+
+          {/* Excel */}
+          <MenuItem onClick={() => { setAnchorEl(null); downloadXLS(); }}>
+            Excel — Summary (with Reasons)
+          </MenuItem>
         </Menu>
       </Box>
 
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
-        {mode === "day" ? `Range: ${day}` : `Range: ${from} → ${to}`} &nbsp; | &nbsp; {note} &nbsp; | &nbsp; TZ: {ZONE}
+        {mode === "day" ? `Range: ${day}` : `Range: ${from} → ${to}`}
+        &nbsp; | &nbsp; {isSingleSelected ? `Employee: ${selectedName}` : "All Employees"}
+        &nbsp; | &nbsp; General: {gDaily}m/day • Namaz: {nDaily}m/day
+        &nbsp; | &nbsp; TZ: {ZONE}
       </Typography>
 
       {/* Table (UI) */}
@@ -798,6 +1029,7 @@ export default function Employees() {
                 to={to}
                 generalLimit={effectiveGeneralLimit()}
                 categoryColors={config.categoryColors}
+                defaultOpen={filtered.length === 1}
               />
             ))}
           </TableBody>
@@ -806,5 +1038,6 @@ export default function Employees() {
     </Box>
   );
 }
+
 
 
