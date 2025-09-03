@@ -23,6 +23,11 @@ const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
 const cleanName = (s) => (s || "").replace(/\s+/g, " ").trim();
 const slugName  = (s) => cleanName(s).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "employee";
 
+// Simple OK/Cancel before generating files
+function confirmDownload(label) {
+  return window.confirm(`Download ${label}?`);
+}
+
 function ymdInAsiaFromISO(iso) {
   if (!iso) return null;
   try {
@@ -231,7 +236,8 @@ function getStatusForEmp(emp, ctx) {
    ========================= */
 function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, categoryColors, defaultOpen = false }) {
   const theme = useTheme();
-  const [open, setOpen] = useState(Boolean(defaultOpen));
+  the constOpen = Boolean(defaultOpen);
+  const [open, setOpen] = useState(the constOpen);
   const all = Array.isArray(emp.idle_sessions) ? emp.idle_sessions : [];
 
   const grouped = useMemo(() => {
@@ -480,7 +486,6 @@ export default function Employees() {
       const res = await axios.get(`${API}/employees`, { timeout: 20000 });
       const arr = Array.isArray(res.data) ? res.data : res.data.employees || [];
       setEmployees(arr);
-      // if server includes settings.general_idle_limit, honor it
       const gl = res.data?.settings?.general_idle_limit;
       if (typeof gl === "number") {
         setConfig((c) => ({ ...c, generalIdleLimit: gl }));
@@ -493,6 +498,7 @@ export default function Employees() {
   const fetchConfig = async () => {
     try {
       const res = await axios.get(`${API}/config`, { timeout: 15000 });
+    // server returns { generalIdleLimit, namazLimit, categoryColors }
       setConfig((c) => ({ ...c, ...(res.data || {}) }));
     } catch (e) {
       console.warn("Config fetch failed (using defaults).", e?.message || e);
@@ -520,7 +526,7 @@ export default function Employees() {
     if (mode !== "month") return;
     const [yy, mm] = month.split("-").map(Number);
     const start = `${yy}-${pad(mm)}-01`;
-    const endDate = new Date(yy, mm, 0).getDate(); // days in month
+    const endDate = new Date(yy, mm, 0).getDate();
     const end = `${yy}-${pad(mm)}-${pad(endDate)}`;
     setFrom(start);
     setTo(end);
@@ -578,7 +584,7 @@ export default function Employees() {
   function downloadPDFDailyDetailSelected() {
     if (employeeFilter === "all" || !filtered.length || mode !== "day") return;
 
-    const emp = filtered[0]; // only one because filtered by exact id above
+    const emp = filtered[0];
     const empName = cleanName(emp.name);
     const sessions = sessionsForEmp(emp).sort((a,b) =>
       (new Date(a.idle_start||0)) - (new Date(b.idle_start||0))
@@ -589,7 +595,6 @@ export default function Employees() {
     const pageW = doc.internal.pageSize.getWidth();
 
     const brand = [59,130,246];
-    // header — simple name (no id)
     doc.setFillColor(31,41,55);
     doc.rect(0,0,pageW,64,"F");
     doc.setFont("helvetica","bold"); doc.setFontSize(20); doc.setTextColor("#fff");
@@ -597,13 +602,11 @@ export default function Employees() {
     doc.setFont("helvetica","normal"); doc.setFontSize(11);
     doc.text(`Dept: ${emp.department || "-"}   Shift: ${emp.shift_start} – ${emp.shift_end}   Day: ${day}   TZ: ${ZONE}`, 40, 46);
 
-    // group chip
     doc.setFillColor(...brand);
     doc.roundedRect(40,84,340,26,6,6,"F");
     doc.setFont("helvetica","bold"); doc.setFontSize(12); doc.setTextColor("#fff");
     doc.text(`${day} — ${emp.shift_start} – ${emp.shift_end}`, 50, 101);
 
-    // table
     const body = sessions.map(s => [
       s.category || "-",
       s.start_time_local || "-",
@@ -624,7 +627,6 @@ export default function Employees() {
       alternateRowStyles: { fillColor: [248,250,252] },
     });
 
-    // totals cards
     const y = doc.lastAutoTable.finalY + 18;
     const boxW = 190, boxH = 68, gap = 16;
     const blocks = [
@@ -647,7 +649,7 @@ export default function Employees() {
     doc.save(`daily_${slugName(empName)}_${day}.pdf`);
   }
 
-  /* ---------- DAILY SUMMARY (All Employees) ---------- */
+  /* ---------- DAILY SUMMARY (All Employees) — fixed reasons width ---------- */
   function summarizeReasonsByCategory(sessions) {
     const ORDER = ["General", "Namaz", "Official", "AutoBreak"];
     const OTHER = "Other";
@@ -721,7 +723,7 @@ export default function Employees() {
         ? `Limits: General ${gDaily}m/day (cap ${gCap}m), Namaz ${nDaily}m/day (cap ${nCap}m)`
         : `Limits: General ${gDaily}m/day, Namaz ${nDaily}m/day`;
 
-    const header = (data) => {
+    const header = () => {
       doc.setFillColor(brand[0], brand[1], brand[2]);
       doc.rect(0, 0, pageW, 64, "F");
 
@@ -752,19 +754,40 @@ export default function Employees() {
     autoTable(doc, {
       head: [headers],
       body,
-      margin: { left: 40, right: 40, top: 70, bottom: 28 },
-      tableWidth: "wrap",
-      styles: { fontSize: 10, cellPadding: 6, halign: "center", valign: "middle" },
+      margin: { left: 28, right: 28, top: 70, bottom: 28 },
+      tableWidth: "auto",
+      styles: { fontSize: 9, cellPadding: { top: 4, right: 4, bottom: 4, left: 4 }, halign: "center", valign: "middle" },
       headStyles: { fillColor: accent, textColor: 255, halign: "center", fontStyle: "bold", overflow: "linebreak" },
       theme: "striped",
       striped: true,
       alternateRowStyles: { fillColor: [248, 250, 252] },
       columnStyles: {
-        1: { halign: "left", cellWidth: 120 },
-        2: { halign: "left", cellWidth: 110 },
-        8: { halign: "left", cellWidth: 460, overflow: "linebreak" },
+        0: { cellWidth: 70 },   // Emp ID
+        1: { halign: "left", cellWidth: 130 }, // Name
+        2: { halign: "left", cellWidth: 100 }, // Dept
+        3: { cellWidth: 60 },   // Total
+        4: { cellWidth: 60 },   // General
+        5: { cellWidth: 60 },   // Namaz
+        6: { cellWidth: 60 },   // Official
+        7: { cellWidth: 60 },   // Auto
+        8: { cellWidth: "auto", overflow: "linebreak", minCellWidth: 220 } // Reasons wraps and takes remaining width
       },
-      didDrawPage: (data) => { header(data); footer(data); },
+      didParseCell: (data) => {
+        if (data.section === "body" && [3,4,5,6,7].includes(data.column.index)) {
+          data.cell.styles.fontStyle = "bold";
+        }
+        if (data.section === "body") {
+          if (data.column.index === 4) {
+            const v = Number(data.cell.raw || 0);
+            if (v > gCap) { data.cell.styles.fillColor = [255,237,213]; data.cell.styles.textColor = [194,65,12]; }
+          }
+          if (data.column.index === 5) {
+            const v = Number(data.cell.raw || 0);
+            if (v > nCap) { data.cell.styles.fillColor = [254,226,226]; data.cell.styles.textColor = [220,38,38]; }
+          }
+        }
+      },
+      didDrawPage: (data) => { header(); footer(data); },
       startY: 84,
     });
 
@@ -779,7 +802,7 @@ export default function Employees() {
       const sessions = sessionsForEmp(emp);
       const sums = calcTotals(sessions);
 
-      const days = uniqueDays(sessions).size || getMonthDays(); // or force getMonthDays() if you prefer
+      const days = uniqueDays(sessions).size || getMonthDays();
       const shiftSpan = shiftSpanMinutes(emp.shift_start, emp.shift_end);
 
       // Working time approximation: scheduled span × active days − all idle/breaks
@@ -837,7 +860,6 @@ export default function Employees() {
         2: { halign: "left", cellWidth: 120 },
       },
       didParseCell: (data) => {
-        // highlight exceed cells
         if (data.section === "body" && (data.column.index === 8 || data.column.index === 9)) {
           const val = String(data.cell.raw || "-");
           if (val.startsWith("+")) {
@@ -855,7 +877,7 @@ export default function Employees() {
     doc.save(fname);
   }
 
-  /* ---------- MENU + QUICK DOWNLOAD ---------- */
+  /* ---------- MENU + DOWNLOAD ACTIONS ---------- */
   function downloadXLS() {
     const headers = [
       "Employee ID","Name","Department","Total Idle (min)","General (min)",
@@ -882,7 +904,6 @@ export default function Employees() {
     if (mode === "month") {
       return isSingleSelected ? downloadPDFMonthlyTotals("one") : downloadPDFMonthlyTotals("all");
     }
-    // range → reuse the daily summary layout
     return downloadPDFDailySummaryAll();
   }
 
@@ -954,26 +975,36 @@ export default function Employees() {
 
         <Box flex={1} />
 
+        {/* Button just opens menu. Actual download happens after user picks + confirms */}
         <Button
           variant="contained"
           startIcon={<Download />}
-          onClick={(e) => { handleQuickDownload(); setAnchorEl(e.currentTarget); }}
+          onClick={(e) => setAnchorEl(e.currentTarget)}
         >
           {isSingleSelected ? `Download: ${selectedName}` : "Download Report"}
         </Button>
         <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
           {/* Quick */}
-          <MenuItem onClick={() => { setAnchorEl(null); handleQuickDownload(); }}>
+          <MenuItem onClick={() => {
+            setAnchorEl(null);
+            if (confirmDownload(quickLabel)) handleQuickDownload();
+          }}>
             Quick — {quickLabel}
           </MenuItem>
 
           {/* Daily */}
-          <MenuItem onClick={() => { setAnchorEl(null); downloadPDFDailySummaryAll(); }}>
+          <MenuItem onClick={() => {
+            setAnchorEl(null);
+            if (confirmDownload("Daily — All Employees")) downloadPDFDailySummaryAll();
+          }}>
             Daily — All Employees
           </MenuItem>
           <MenuItem
             disabled={!(mode === "day" && isSingleSelected)}
-            onClick={() => { setAnchorEl(null); downloadPDFDailyDetailSelected(); }}
+            onClick={() => {
+              setAnchorEl(null);
+              if (confirmDownload(`Daily — ${selectedName || "Selected Employee"}`)) downloadPDFDailyDetailSelected();
+            }}
           >
             Daily — {selectedName || "Selected Employee"}
           </MenuItem>
@@ -981,19 +1012,28 @@ export default function Employees() {
           {/* Monthly */}
           <MenuItem
             disabled={mode !== "month"}
-            onClick={() => { setAnchorEl(null); downloadPDFMonthlyTotals("all"); }}
+            onClick={() => {
+              setAnchorEl(null);
+              if (confirmDownload("Monthly — All Employees")) downloadPDFMonthlyTotals("all");
+            }}
           >
             Monthly — All Employees
           </MenuItem>
           <MenuItem
             disabled={!(mode === "month" && isSingleSelected)}
-            onClick={() => { setAnchorEl(null); downloadPDFMonthlyTotals("one"); }}
+            onClick={() => {
+              setAnchorEl(null);
+              if (confirmDownload(`Monthly — ${selectedName || "Selected Employee"}`)) downloadPDFMonthlyTotals("one");
+            }}
           >
             Monthly — {selectedName || "Selected Employee"}
           </MenuItem>
 
           {/* Excel */}
-          <MenuItem onClick={() => { setAnchorEl(null); downloadXLS(); }}>
+          <MenuItem onClick={() => {
+            setAnchorEl(null);
+            if (confirmDownload("Excel — Summary")) downloadXLS();
+          }}>
             Excel — Summary (with Reasons)
           </MenuItem>
         </Menu>
@@ -1038,6 +1078,3 @@ export default function Employees() {
     </Box>
   );
 }
-
-
-
