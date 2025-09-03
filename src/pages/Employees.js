@@ -173,7 +173,8 @@ function computeDbAwareStatus(emp, ctx) {
                                "warning";
       return { label: `On Break — ${onCat}`, color };
     }
-    return { label: "Idle", color: "warning" };
+    // ⬇️ IMPORTANT: if DB says "Idle" but no ongoing idle, let fallback decide
+    return null;
   }
   if (raw === "break" || raw === "on break" || raw === "paused") {
     return { label: onCat ? `On Break — ${onCat}` : "On Break", color: "warning" };
@@ -347,7 +348,21 @@ function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, category
                               </TableCell>
                               <TableCell>{s.start_time_local || "-"}</TableCell>
                               <TableCell>{s.end_time_local || "Ongoing"}</TableCell>
-                              <TableCell>{s.reason || "-"}</TableCell>
+
+                              {/* REASON WRAPS ON MULTIPLE LINES */}
+                              <TableCell
+                                sx={{
+                                  whiteSpace: "normal",
+                                  overflowWrap: "anywhere",
+                                  wordBreak: "break-word",
+                                  maxWidth: 520,
+                                  lineHeight: 1.35,
+                                  py: 1
+                                }}
+                              >
+                                {s.reason || "-"}
+                              </TableCell>
+
                               <TableCell>
                                 {s.category === "AutoBreak"
                                   ? `${Number(s.duration ?? 0).toFixed(1)} min`
@@ -450,7 +465,6 @@ export default function Employees() {
   const fetchConfig = async () => {
     try {
       const res = await axios.get(`${API}/config`, { timeout: 15000 });
-      // server returns { generalIdleLimit, namazLimit, categoryColors }
       setConfig((c) => ({ ...c, ...(res.data || {}) }));
     } catch (e) {
       console.warn("Config fetch failed (using defaults).", e?.message || e);
@@ -616,7 +630,10 @@ export default function Employees() {
     };
 
     const body = collectReportRowsWithReasons();
-    const headers = ["Emp ID","Name","Dept","Total (m)","General (m)","Namaz (m)","Official (m)","Auto (m)","Reasons (by Category)"];
+    const headers = [
+      "Emp ID","Name","Dept","Total (m)","General (m)","Namaz (m)","Official (m)","Auto (m)",
+      "Reasons (by\nCategory)" // header wraps to 2 lines
+    ];
 
     autoTable(doc, {
       head: [headers],
@@ -624,17 +641,17 @@ export default function Employees() {
       margin: { left: 40, right: 40, top: 70, bottom: 28 },
       tableWidth: "wrap",
       styles: { fontSize: 10, cellPadding: 6, halign: "center", valign: "middle" },
-      headStyles: { fillColor: accent, textColor: 255, halign: "center" },
+      headStyles: { fillColor: accent, textColor: 255, halign: "center", fontStyle: "bold", overflow: "linebreak" },
       theme: "striped",
       striped: true,
       alternateRowStyles: { fillColor: [248, 250, 252] },
       columnStyles: {
         1: { halign: "left", cellWidth: 120 }, // Name
         2: { halign: "left", cellWidth: 110 }, // Dept
-        8: { halign: "left", cellWidth: 460 }, // wider Reasons
+        8: { halign: "left", cellWidth: 460, overflow: "linebreak" }, // wider + wrap Reasons
       },
       didParseCell: (data) => {
-        // wrap long reasons
+        // body reasons wrap (safety)
         if (data.section === "body" && data.column.index === 8) {
           data.cell.styles.overflow = "linebreak";
         }
@@ -789,4 +806,5 @@ export default function Employees() {
     </Box>
   );
 }
+
 
