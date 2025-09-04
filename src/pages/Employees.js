@@ -236,8 +236,9 @@ function getStatusForEmp(emp, ctx) {
    ========================= */
 function EmployeeRow({ emp, dayMode, pickedDay, from, to, generalLimit, categoryColors, defaultOpen = false }) {
   const theme = useTheme();
-  the constOpen = Boolean(defaultOpen);
-  const [open, setOpen] = useState(the constOpen);
+  // FIXED: valid variable name
+  const theConstOpen = Boolean(defaultOpen);
+  const [open, setOpen] = useState(theConstOpen);
   const all = Array.isArray(emp.idle_sessions) ? emp.idle_sessions : [];
 
   const grouped = useMemo(() => {
@@ -498,7 +499,7 @@ export default function Employees() {
   const fetchConfig = async () => {
     try {
       const res = await axios.get(`${API}/config`, { timeout: 15000 });
-    // server returns { generalIdleLimit, namazLimit, categoryColors }
+      // server returns { generalIdleLimit, namazLimit, categoryColors }
       setConfig((c) => ({ ...c, ...(res.data || {}) }));
     } catch (e) {
       console.warn("Config fetch failed (using defaults).", e?.message || e);
@@ -517,7 +518,7 @@ export default function Employees() {
       if (mode !== "day" || !autoShiftDay) return;
       const sd = currentShiftYmd();
       setDay((d) => (d !== sd ? sd : d));
-    }, 60_000);
+    }, 60000);
     return () => clearInterval(t);
   }, [mode, autoShiftDay]);
 
