@@ -3,25 +3,19 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   Paper, Table, TableBody, TableCell, TableHead, TableRow, Typography,
   TextField, Box, TableContainer, Avatar, Chip, Collapse, IconButton,
-  Card, CardContent, Tooltip, Grid, Button, Menu, MenuItem, Select
+  Card, CardContent, Tooltip, Grid, Button, Menu, MenuItem, Select,
+  Dialog, DialogTitle, DialogContent, DialogActions
 } from "@mui/material";
 import { useTheme, alpha } from "@mui/material/styles";
-import {
-  KeyboardArrowDown, KeyboardArrowUp, AccessTime, Download
-} from "@mui/icons-material";
+import { KeyboardArrowDown, KeyboardArrowUp, AccessTime, Download } from "@mui/icons-material";
 import axios from "axios";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
-// NEW: imports for Edit dialog
-import {
-  Dialog, DialogTitle, DialogContent, DialogActions
-} from "@mui/material";
-
 /* =========================
    API base
    ========================= */
-const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
+const API = process.env.REACT_APP_API_URL || "http://localhost:3000"; // your backend
 const ZONE = "Asia/Karachi";
 
 /* =========================
@@ -46,13 +40,13 @@ function ymdInAsiaFromISO(iso) {
       month: "2-digit",
       day: "2-digit"
     });
-    return fmt.format(d); // YYYY-MM-DD
+    return fmt.format(d);
   } catch {
     return null;
   }
 }
 
-// before 06:00 local → use previous day as “shift business day”
+// before 06:00 local → use previous day
 function currentShiftYmd() {
   const fmtYmd = new Intl.DateTimeFormat("en-CA", {
     timeZone: ZONE,
@@ -78,15 +72,10 @@ function currentShiftYmd() {
   const dt = new Date(Date.UTC(y, m - 1, d));
   dt.setUTCDate(dt.getUTCDate() - 1);
   return (
-    dt.getUTCFullYear() +
-    "-" +
-    pad(dt.getUTCMonth() + 1) +
-    "-" +
-    pad(dt.getUTCDate())
+    dt.getUTCFullYear() + "-" + pad(dt.getUTCMonth() + 1) + "-" + pad(dt.getUTCDate())
   );
 }
 
-// filter using shiftDate if present; else fall back to ISO start converted to Asia/Karachi
 function inPickedRange(shiftDate, mode, day, from, to, idleStartISO) {
   let sd = shiftDate;
   if (!sd) sd = ymdInAsiaFromISO(idleStartISO);
@@ -113,22 +102,17 @@ function calcTotals(sessions) {
 
 const toH1 = (min) => ((min || 0) / 60).toFixed(1);
 
-/* Parse shift strings like "6:00 PM" / "09:00" → minutes */
 function parseShiftToMinutes(str) {
   if (!str) return null;
   const s = String(str).trim().toUpperCase();
   const parts = s.split(/\s+/);
   if (parts.length === 2 && (parts[1] === "AM" || parts[1] === "PM")) {
-    let hm = parts[0].split(":").map(Number);
-    let h = hm[0];
-    const m = hm[1] || 0;
+    let [h, m = 0] = parts[0].split(":").map(Number);
     if (parts[1] === "PM" && h < 12) h += 12;
     if (parts[1] === "AM" && h === 12) h = 0;
     return h * 60 + m;
   }
-  const hm2 = s.split(":").map(Number);
-  const h2 = hm2[0];
-  const m2 = hm2[1];
+  const [h2, m2] = s.split(":").map(Number);
   if (Number.isFinite(h2) && Number.isFinite(m2)) return h2 * 60 + m2;
   return null;
 }
@@ -140,7 +124,7 @@ function shiftSpanMinutes(shiftStart, shiftEnd) {
 }
 
 /* =========================
-   Excel maker
+   XLS helper
    ========================= */
 function downloadXls(filename, headers, rows) {
   const headerHtml = headers
@@ -256,11 +240,27 @@ function getStatusForEmp(emp, ctx) {
 }
 
 /* =========================
-   Employee row
+   Update/Delete gate — checks BACKEND /update
+   ========================= */
+async function checkUpdateGate() {
+  try {
+    const res = await fetch(`${API}/update`, {
+      method: "GET",
+      credentials: "include",
+      redirect: "manual"
+    });
+    return res.status >= 200 && res.status < 300;
+  } catch {
+    return false;
+  }
+}
+
+/* =========================
+   Row
    ========================= */
 function EmployeeRow({
-  emp, dayMode, pickedDay, from, to, generalLimit, categoryColors, defaultOpen = false,
-  canEdit, onEdit, onDelete
+  emp, dayMode, pickedDay, from, to, generalLimit, categoryColors,
+  defaultOpen = false, allowUpdateDelete = false, onEdit, onDelete
 }) {
   const theme = useTheme();
   const [open, setOpen] = useState(Boolean(defaultOpen));
@@ -322,32 +322,29 @@ function EmployeeRow({
           <Chip label={status.label} color={status.color} variant="filled" sx={{ fontWeight: 600 }} />
         </TableCell>
         <TableCell align="center">
-          <Tooltip title="Show Sessions">
-            <IconButton onClick={() => setOpen((x) => !x)}>
-              {open ? <KeyboardArrowUp /> : <KeyboardArrowDown />}
-            </IconButton>
-          </Tooltip>
-        </TableCell>
+          <Box display="flex" alignItems="center" gap={1} justifyContent="center">
+            <Tooltip title="Show Sessions">
+              <IconButton onClick={() => setOpen((x) => !x)}>
+                {open ? <KeyboardArrowUp /> : <KeyboardArrowDown />}
+              </IconButton>
+            </Tooltip>
 
-        {canEdit && (
-          <TableCell align="right">
-            <Box display="flex" gap={1} justifyContent="flex-end">
-              <Button size="small" variant="outlined" onClick={() => onEdit(emp)}>Edit</Button>
-              <Button
-                size="small"
-                variant="contained"
-                color="error"
-                onClick={() => onDelete(emp)}
-              >
-                Delete
-              </Button>
-            </Box>
-          </TableCell>
-        )}
+            {allowUpdateDelete && (
+              <>
+                <Button size="small" variant="outlined" onClick={() => onEdit(emp)}>
+                  Update
+                </Button>
+                <Button size="small" color="error" variant="contained" onClick={() => onDelete(emp)}>
+                  Delete
+                </Button>
+              </>
+            )}
+          </Box>
+        </TableCell>
       </TableRow>
 
       <TableRow>
-        <TableCell colSpan={canEdit ? 6 : 5} sx={{ p: 0 }}>
+        <TableCell colSpan={5} sx={{ p: 0 }}>
           <Collapse in={open} timeout="auto" unmountOnExit>
             <Box m={2}>
               <Typography variant="h6" gutterBottom sx={{ fontWeight: 700 }}>
@@ -517,8 +514,12 @@ export default function Employees() {
   });
   const [employeeFilter, setEmployeeFilter] = useState("all");
 
-  // NEW: gate actions if URL contains /employees/update
-  const canEdit = typeof window !== "undefined" && window.location.pathname.includes("/employees/update");
+  // NEW: gate for update/delete visibility
+  const [allowUpdateDelete, setAllowUpdateDelete] = useState(false);
+
+  // Update modal state
+  const [editOpen, setEditOpen] = useState(false);
+  const [editValues, setEditValues] = useState({ id: "", name: "", department: "", shift_start: "", shift_end: "" });
 
   // Modes
   const [mode, setMode] = useState("day"); // 'day' | 'month' | 'range'
@@ -534,21 +535,14 @@ export default function Employees() {
   const [anchorEl, setAnchorEl] = useState(null);
   const openMenu = Boolean(anchorEl);
 
-  // NEW: edit dialog state
-  const [editOpen, setEditOpen] = useState(false);
-  const [editEmp, setEditEmp] = useState(null);
-  const [form, setForm] = useState({ name: "", department: "", shift_start: "", shift_end: "" });
-
   /* ----- API fetch ----- */
   const fetchEmployees = async () => {
     try {
-      const res = await axios.get(API + "/employees", { timeout: 20000 });
+      const res = await axios.get(API + "/employees", { timeout: 20000, withCredentials: true });
       const arr = Array.isArray(res.data) ? res.data : res.data.employees || [];
       setEmployees(arr);
       const gl = res.data && res.data.settings ? res.data.settings.general_idle_limit : undefined;
-      if (typeof gl === "number") {
-        setConfig((c) => ({ ...c, generalIdleLimit: gl }));
-      }
+      if (typeof gl === "number") setConfig((c) => ({ ...c, generalIdleLimit: gl }));
     } catch (e) {
       console.error("Error fetching employees:", e);
     }
@@ -556,7 +550,7 @@ export default function Employees() {
 
   const fetchConfig = async () => {
     try {
-      const res = await axios.get(API + "/config", { timeout: 15000 });
+      const res = await axios.get(API + "/config", { timeout: 15000, withCredentials: true });
       setConfig((c) => ({ ...c, ...(res.data || {}) }));
     } catch (e) {
       console.warn("Config fetch failed (using defaults).", e && e.message ? e.message : e);
@@ -566,6 +560,8 @@ export default function Employees() {
   useEffect(() => {
     fetchEmployees();
     fetchConfig();
+    // Gate: check backend /update (not frontend)
+    checkUpdateGate().then(setAllowUpdateDelete);
     const interval = setInterval(fetchEmployees, 60000);
     return () => clearInterval(interval);
   }, []);
@@ -579,7 +575,6 @@ export default function Employees() {
     return () => clearInterval(t);
   }, [mode, autoShiftDay]);
 
-  // Month bounds
   useEffect(() => {
     if (mode !== "month") return;
     const parts = month.split("-").map(Number);
@@ -641,6 +636,44 @@ export default function Employees() {
     return set;
   };
 
+  /* ======== Update/Delete handlers ======== */
+  function onEditOpen(emp) {
+    setEditValues({
+      id: emp._id || emp.id || emp.emp_id,
+      name: emp.name || "",
+      department: emp.department || "",
+      shift_start: emp.shift_start || "",
+      shift_end: emp.shift_end || ""
+    });
+    setEditOpen(true);
+  }
+
+  async function onEditSave() {
+    try {
+      const { id, name, department, shift_start, shift_end } = editValues;
+      await axios.put(`${API}/employees/${encodeURIComponent(id)}`, {
+        name, department, shift_start, shift_end
+      }, { withCredentials: true, timeout: 15000 });
+      setEditOpen(false);
+      await fetchEmployees();
+    } catch (e) {
+      alert("Update failed: " + (e?.response?.data?.error || e.message));
+    }
+  }
+
+  async function onDeleteEmp(emp) {
+    const id = emp._id || emp.id || emp.emp_id;
+    if (!id) return;
+    if (!window.confirm(`Delete employee "${emp.name}"? This cannot be undone.`)) return;
+    try {
+      await axios.delete(`${API}/employees/${encodeURIComponent(id)}`, { withCredentials: true, timeout: 15000 });
+      await fetchEmployees();
+    } catch (e) {
+      alert("Delete failed: " + (e?.response?.data?.error || e.message));
+    }
+  }
+
+  /* ---------- Downloads (existing logic kept) ---------- */
   function downloadPDFDailyDetailSelected() {
     if (employeeFilter === "all" || !filtered.length || mode !== "day") return;
 
@@ -983,61 +1016,14 @@ export default function Employees() {
       : (isSingleSelected ? "Range — " + selectedName : "Range — All Employees");
 
   function handleQuickDownload() {
-    if (mode === "day") {
-      return isSingleSelected ? downloadPDFDailyDetailSelected() : downloadPDFDailySummaryAll();
-    }
-    if (mode === "month") {
-      return isSingleSelected ? downloadPDFMonthlyTotals("one") : downloadPDFMonthlyTotals("all");
-    }
+    if (mode === "day") return isSingleSelected ? downloadPDFDailyDetailSelected() : downloadPDFDailySummaryAll();
+    if (mode === "month") return isSingleSelected ? downloadPDFMonthlyTotals("one") : downloadPDFMonthlyTotals("all");
     return downloadPDFDailySummaryAll();
   }
 
   const gDaily = config.generalIdleLimit == null ? 60 : config.generalIdleLimit;
   const nDaily = config.namazLimit == null ? 50 : config.namazLimit;
   const headerGradient = "linear-gradient(90deg, " + theme.palette.primary.main + ", " + theme.palette.success.main + ")";
-
-  // --- Edit handlers ---
-  const openEdit = (emp) => {
-    setEditEmp(emp);
-    setForm({
-      name: emp?.name || "",
-      department: emp?.department || "",
-      shift_start: emp?.shift_start || "",
-      shift_end: emp?.shift_end || ""
-    });
-    setEditOpen(true);
-  };
-
-  const submitEdit = async () => {
-    if (!editEmp) return;
-    const id = editEmp.emp_id || editEmp.id || editEmp._id;
-    try {
-      await axios.put(`${API}/employees/${encodeURIComponent(id)}`, {
-        name: form.name,
-        department: form.department,
-        shift_start: form.shift_start,
-        shift_end: form.shift_end
-      }, { timeout: 15000 });
-      setEditOpen(false);
-      setEditEmp(null);
-      await fetchEmployees();
-    } catch (e) {
-      console.error("Update failed:", e);
-      alert("Update failed: " + (e?.response?.data?.error || e.message));
-    }
-  };
-
-  const handleDelete = async (emp) => {
-    const id = emp.emp_id || emp.id || emp._id;
-    if (!window.confirm(`Delete ${emp.name}? This cannot be undone.`)) return;
-    try {
-      await axios.delete(`${API}/employees/${encodeURIComponent(id)}`, { timeout: 15000 });
-      await fetchEmployees();
-    } catch (e) {
-      console.error("Delete failed:", e);
-      alert("Delete failed: " + (e?.response?.data?.error || e.message));
-    }
-  };
 
   return (
     <Box p={3}>
@@ -1176,8 +1162,7 @@ export default function Employees() {
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Department</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Shift</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Status</TableCell>
-              <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="center">Sessions</TableCell>
-              {canEdit && <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="right">Actions</TableCell>}
+              <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="center">Sessions / Actions</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -1192,47 +1177,52 @@ export default function Employees() {
                 generalLimit={effectiveGeneralLimit()}
                 categoryColors={config.categoryColors}
                 defaultOpen={filtered.length === 1}
-                canEdit={canEdit}
-                onEdit={openEdit}
-                onDelete={handleDelete}
+                allowUpdateDelete={allowUpdateDelete}
+                onEdit={onEditOpen}
+                onDelete={onDeleteEmp}
               />
             ))}
           </TableBody>
         </Table>
       </TableContainer>
 
-      {/* Edit Dialog */}
-      <Dialog open={editOpen} onClose={() => setEditOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Edit Employee</DialogTitle>
+      {/* Update Dialog */}
+      <Dialog open={editOpen} onClose={() => setEditOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Update Employee</DialogTitle>
         <DialogContent dividers>
-          <Box display="grid" gridTemplateColumns={{ xs: "1fr", sm: "1fr 1fr" }} gap={2} mt={1}>
+          <Box mt={1} display="grid" gridTemplateColumns="1fr 1fr" gap={2}>
             <TextField
               label="Name"
-              value={form.name}
-              onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+              value={editValues.name}
+              onChange={(e) => setEditValues((v) => ({ ...v, name: e.target.value }))}
+              fullWidth
             />
             <TextField
               label="Department"
-              value={form.department}
-              onChange={(e) => setForm((f) => ({ ...f, department: e.target.value }))}
+              value={editValues.department}
+              onChange={(e) => setEditValues((v) => ({ ...v, department: e.target.value }))}
+              fullWidth
             />
             <TextField
               label="Shift Start (e.g. 6:00 PM or 18:00)"
-              value={form.shift_start}
-              onChange={(e) => setForm((f) => ({ ...f, shift_start: e.target.value }))}
+              value={editValues.shift_start}
+              onChange={(e) => setEditValues((v) => ({ ...v, shift_start: e.target.value }))}
+              fullWidth
             />
             <TextField
               label="Shift End (e.g. 3:00 AM or 03:00)"
-              value={form.shift_end}
-              onChange={(e) => setForm((f) => ({ ...f, shift_end: e.target.value }))}
+              value={editValues.shift_end}
+              onChange={(e) => setEditValues((v) => ({ ...v, shift_end: e.target.value }))}
+              fullWidth
             />
           </Box>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setEditOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={submitEdit}>Save</Button>
+          <Button variant="contained" onClick={onEditSave}>Save</Button>
         </DialogActions>
       </Dialog>
     </Box>
   );
 }
+
