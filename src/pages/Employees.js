@@ -265,6 +265,32 @@ async function checkUpdateGate() {
   }
 }
 
+/* ---------- date+time helpers for dialog ---------- */
+function toInputDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  return `${yyyy}-${mm}-${dd}`;
+}
+function toInputTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  const ss = pad(d.getSeconds());
+  return `${hh}:${mi}:${ss}`;
+}
+function localDateTimeToISO(dateStr, timeStr) {
+  if (!dateStr || !timeStr) return null;
+  // Build a local Date and return UTC ISO
+  const safeTime = timeStr.length === 5 ? `${timeStr}:00` : timeStr; // allow HH:mm
+  const d = new Date(`${dateStr}T${safeTime}`);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
 /* =========================
    Row
    ========================= */
@@ -552,9 +578,12 @@ export default function Employees() {
   const [editOpen, setEditOpen] = useState(false);
   const [editValues, setEditValues] = useState({ id: "", name: "", department: "", shift_start: "", shift_end: "" });
 
-  // Update modal (Session/Activity)
+  // Update modal (Session/Activity) — now includes date/time
   const [editSessOpen, setEditSessOpen] = useState(false);
-  const [editSessValues, setEditSessValues] = useState({ id: "", kind: "Idle", reason: "", category: "" });
+  const [editSessValues, setEditSessValues] = useState({
+    id: "", kind: "Idle", reason: "", category: "General",
+    startDate: "", startTime: "", endDate: "", endTime: ""
+  });
 
   // Modes
   const [mode, setMode] = useState("day");
@@ -715,27 +744,43 @@ export default function Employees() {
 
   /* ======== Activity Log Edit/Close ======== */
   function onEditSessionOpen(_emp, session) {
-    // Only Idle sessions editable for reason/category
+    // Only Idle sessions editable for reason/category/time
+    const startISO = session.idle_start || null;
+    const endISO = session.idle_end || null;
     setEditSessValues({
       id: session._id || session.id,
       kind: session.kind || (session.category === "AutoBreak" ? "AutoBreak" : "Idle"),
       reason: session.reason || "",
       category: session.category || "General",
+      startDate: startISO ? toInputDate(startISO) : (session.shiftDate || ""),
+      startTime: startISO ? toInputTime(startISO) : (session.start_time_local || "").slice(0,8),
+      endDate: endISO ? toInputDate(endISO) : "",
+      endTime: endISO ? toInputTime(endISO) : "",
     });
     setEditSessOpen(true);
   }
 
   async function onEditSessionSave() {
     try {
-      const { id, kind, reason, category } = editSessValues;
+      const { id, kind, reason, category, startDate, startTime, endDate, endTime } = editSessValues;
       if (kind === "AutoBreak") {
-        alert("AutoBreak text is system-generated; edit not supported here.");
+        alert("AutoBreak rows are system-generated; manual edits are disabled.");
         setEditSessOpen(false);
         return;
       }
+
+      const idle_start = localDateTimeToISO(startDate, startTime);
+      const idle_end = (endDate && endTime) ? localDateTimeToISO(endDate, endTime) : null;
+
+      if (!idle_start) {
+        alert("Start date/time is invalid.");
+        return;
+      }
+
       await axios.put(`${API}/activities/${encodeURIComponent(id)}`, {
-        reason, category
+        reason, category, idle_start, idle_end
       }, { withCredentials: true, timeout: 15000 });
+
       setEditSessOpen(false);
       await fetchEmployees();
     } catch (e) {
@@ -1313,7 +1358,7 @@ export default function Employees() {
         </DialogActions>
       </Dialog>
 
-      {/* Edit Activity Dialog (Idle) */}
+      {/* Edit Activity Dialog (Idle) — with time fields */}
       <Dialog open={editSessOpen} onClose={() => setEditSessOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Update Activity Log</DialogTitle>
         <DialogContent dividers>
@@ -1337,9 +1382,45 @@ export default function Employees() {
               onChange={(e) => setEditSessValues((v) => ({ ...v, reason: e.target.value }))}
               fullWidth
             />
+
+            <TextField
+              label="Start Date"
+              type="date"
+              value={editSessValues.startDate}
+              onChange={(e) => setEditSessValues((v) => ({ ...v, startDate: e.target.value }))}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+            <TextField
+              label="Start Time (HH:mm or HH:mm:ss)"
+              type="time"
+              value={editSessValues.startTime}
+              onChange={(e) => setEditSessValues((v) => ({ ...v, startTime: e.target.value }))}
+              inputProps={{ step: 1 }}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+
+            <TextField
+              label="End Date (optional)"
+              type="date"
+              value={editSessValues.endDate}
+              onChange={(e) => setEditSessValues((v) => ({ ...v, endDate: e.target.value }))}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+            <TextField
+              label="End Time (optional)"
+              type="time"
+              value={editSessValues.endTime}
+              onChange={(e) => setEditSessValues((v) => ({ ...v, endTime: e.target.value }))}
+              inputProps={{ step: 1 }}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
           </Box>
           <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
-            Note: use <b>Close Now</b> in the table to end an ongoing session.
+            Times are interpreted from your local browser time. Leave end fields blank for ongoing.
           </Typography>
         </DialogContent>
         <DialogActions>
@@ -1350,3 +1431,4 @@ export default function Employees() {
     </Box>
   );
 }
+
