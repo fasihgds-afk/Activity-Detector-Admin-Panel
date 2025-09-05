@@ -6,10 +6,17 @@ import {
   Card, CardContent, Tooltip, Grid, Button, Menu, MenuItem, Select
 } from "@mui/material";
 import { useTheme, alpha } from "@mui/material/styles";
-import { KeyboardArrowDown, KeyboardArrowUp, AccessTime, Download } from "@mui/icons-material";
+import {
+  KeyboardArrowDown, KeyboardArrowUp, AccessTime, Download
+} from "@mui/icons-material";
 import axios from "axios";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+
+// NEW: imports for Edit dialog
+import {
+  Dialog, DialogTitle, DialogContent, DialogActions
+} from "@mui/material";
 
 /* =========================
    API base
@@ -128,12 +135,12 @@ function parseShiftToMinutes(str) {
 function shiftSpanMinutes(shiftStart, shiftEnd) {
   const s = parseShiftToMinutes(shiftStart);
   const e = parseShiftToMinutes(shiftEnd);
-  if (s == null || e == null) return 9 * 60; // default 9h if malformed
-  return e >= s ? e - s : 24 * 60 - s + e; // handle cross midnight
+  if (s == null || e == null) return 9 * 60;
+  return e >= s ? e - s : 24 * 60 - s + e;
 }
 
 /* =========================
-   Excel maker (Summary with Reasons-by-Category)
+   Excel maker
    ========================= */
 function downloadXls(filename, headers, rows) {
   const headerHtml = headers
@@ -200,7 +207,7 @@ function isInShiftNow(shiftStart, shiftEnd) {
   const e = hmToMinutes(shiftEnd);
   if (s == null || e == null) return false;
   if (e >= s) return now >= s && now <= e;
-  return now >= s || now <= e; // crosses midnight
+  return now >= s || now <= e;
 }
 
 function computeDbAwareStatus(emp, ctx) {
@@ -252,10 +259,10 @@ function getStatusForEmp(emp, ctx) {
    Employee row
    ========================= */
 function EmployeeRow({
-  emp, dayMode, pickedDay, from, to, generalLimit, categoryColors, defaultOpen = false
+  emp, dayMode, pickedDay, from, to, generalLimit, categoryColors, defaultOpen = false,
+  canEdit, onEdit, onDelete
 }) {
   const theme = useTheme();
-  // keep parser happy: no fancy names, no missing semicolons
   const [open, setOpen] = useState(Boolean(defaultOpen));
   const all = Array.isArray(emp && emp.idle_sessions) ? emp.idle_sessions : [];
 
@@ -321,10 +328,26 @@ function EmployeeRow({
             </IconButton>
           </Tooltip>
         </TableCell>
+
+        {canEdit && (
+          <TableCell align="right">
+            <Box display="flex" gap={1} justifyContent="flex-end">
+              <Button size="small" variant="outlined" onClick={() => onEdit(emp)}>Edit</Button>
+              <Button
+                size="small"
+                variant="contained"
+                color="error"
+                onClick={() => onDelete(emp)}
+              >
+                Delete
+              </Button>
+            </Box>
+          </TableCell>
+        )}
       </TableRow>
 
       <TableRow>
-        <TableCell colSpan={5} sx={{ p: 0 }}>
+        <TableCell colSpan={canEdit ? 6 : 5} sx={{ p: 0 }}>
           <Collapse in={open} timeout="auto" unmountOnExit>
             <Box m={2}>
               <Typography variant="h6" gutterBottom sx={{ fontWeight: 700 }}>
@@ -413,8 +436,6 @@ function EmployeeRow({
                               </TableCell>
                               <TableCell>{s.start_time_local || "-"}</TableCell>
                               <TableCell>{s.end_time_local || "Ongoing"}</TableCell>
-
-                              {/* REASON WRAPS ON MULTIPLE LINES */}
                               <TableCell
                                 sx={{
                                   whiteSpace: "normal",
@@ -427,7 +448,6 @@ function EmployeeRow({
                               >
                                 {s.reason || "-"}
                               </TableCell>
-
                               <TableCell>
                                 {s.category === "AutoBreak"
                                   ? (Number(s.duration || 0)).toFixed(1) + " min"
@@ -497,6 +517,9 @@ export default function Employees() {
   });
   const [employeeFilter, setEmployeeFilter] = useState("all");
 
+  // NEW: gate actions if URL contains /employees/update
+  const canEdit = typeof window !== "undefined" && window.location.pathname.includes("/employees/update");
+
   // Modes
   const [mode, setMode] = useState("day"); // 'day' | 'month' | 'range'
   const [day, setDay] = useState(currentShiftYmd());
@@ -510,6 +533,11 @@ export default function Employees() {
 
   const [anchorEl, setAnchorEl] = useState(null);
   const openMenu = Boolean(anchorEl);
+
+  // NEW: edit dialog state
+  const [editOpen, setEditOpen] = useState(false);
+  const [editEmp, setEditEmp] = useState(null);
+  const [form, setForm] = useState({ name: "", department: "", shift_start: "", shift_end: "" });
 
   /* ----- API fetch ----- */
   const fetchEmployees = async () => {
@@ -968,6 +996,49 @@ export default function Employees() {
   const nDaily = config.namazLimit == null ? 50 : config.namazLimit;
   const headerGradient = "linear-gradient(90deg, " + theme.palette.primary.main + ", " + theme.palette.success.main + ")";
 
+  // --- Edit handlers ---
+  const openEdit = (emp) => {
+    setEditEmp(emp);
+    setForm({
+      name: emp?.name || "",
+      department: emp?.department || "",
+      shift_start: emp?.shift_start || "",
+      shift_end: emp?.shift_end || ""
+    });
+    setEditOpen(true);
+  };
+
+  const submitEdit = async () => {
+    if (!editEmp) return;
+    const id = editEmp.emp_id || editEmp.id || editEmp._id;
+    try {
+      await axios.put(`${API}/employees/${encodeURIComponent(id)}`, {
+        name: form.name,
+        department: form.department,
+        shift_start: form.shift_start,
+        shift_end: form.shift_end
+      }, { timeout: 15000 });
+      setEditOpen(false);
+      setEditEmp(null);
+      await fetchEmployees();
+    } catch (e) {
+      console.error("Update failed:", e);
+      alert("Update failed: " + (e?.response?.data?.error || e.message));
+    }
+  };
+
+  const handleDelete = async (emp) => {
+    const id = emp.emp_id || emp.id || emp._id;
+    if (!window.confirm(`Delete ${emp.name}? This cannot be undone.`)) return;
+    try {
+      await axios.delete(`${API}/employees/${encodeURIComponent(id)}`, { timeout: 15000 });
+      await fetchEmployees();
+    } catch (e) {
+      console.error("Delete failed:", e);
+      alert("Delete failed: " + (e?.response?.data?.error || e.message));
+    }
+  };
+
   return (
     <Box p={3}>
       {/* Controls */}
@@ -1106,6 +1177,7 @@ export default function Employees() {
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Shift</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Status</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="center">Sessions</TableCell>
+              {canEdit && <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="right">Actions</TableCell>}
             </TableRow>
           </TableHead>
           <TableBody>
@@ -1120,12 +1192,47 @@ export default function Employees() {
                 generalLimit={effectiveGeneralLimit()}
                 categoryColors={config.categoryColors}
                 defaultOpen={filtered.length === 1}
+                canEdit={canEdit}
+                onEdit={openEdit}
+                onDelete={handleDelete}
               />
             ))}
           </TableBody>
         </Table>
       </TableContainer>
+
+      {/* Edit Dialog */}
+      <Dialog open={editOpen} onClose={() => setEditOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Edit Employee</DialogTitle>
+        <DialogContent dividers>
+          <Box display="grid" gridTemplateColumns={{ xs: "1fr", sm: "1fr 1fr" }} gap={2} mt={1}>
+            <TextField
+              label="Name"
+              value={form.name}
+              onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+            />
+            <TextField
+              label="Department"
+              value={form.department}
+              onChange={(e) => setForm((f) => ({ ...f, department: e.target.value }))}
+            />
+            <TextField
+              label="Shift Start (e.g. 6:00 PM or 18:00)"
+              value={form.shift_start}
+              onChange={(e) => setForm((f) => ({ ...f, shift_start: e.target.value }))}
+            />
+            <TextField
+              label="Shift End (e.g. 3:00 AM or 03:00)"
+              value={form.shift_end}
+              onChange={(e) => setForm((f) => ({ ...f, shift_end: e.target.value }))}
+            />
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={submitEdit}>Save</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
-
