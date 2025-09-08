@@ -192,7 +192,7 @@ function hmToMinutes(hhmm) {
   const parts = (hhmm || "").split(":").map(Number);
   const h = parts[0];
   const m = parts[1];
-  return Number.isNaN(h) || Number.isNaN(m) ? null : h * 60 + m;
+  return Number.isNaN(h) || Number.isNaN(m ? m : 0) ? null : h * 60 + (m || 0);
 }
 function isInShiftNow(shiftStart, shiftEnd) {
   const nowHM = karachiNowHM();
@@ -284,8 +284,7 @@ function toInputTime(iso) {
 }
 function localDateTimeToISO(dateStr, timeStr) {
   if (!dateStr || !timeStr) return null;
-  // Build a local Date and return UTC ISO
-  const safeTime = timeStr.length === 5 ? `${timeStr}:00` : timeStr; // allow HH:mm
+  const safeTime = timeStr.length === 5 ? `${timeStr}:00` : timeStr;
   const d = new Date(`${dateStr}T${safeTime}`);
   if (isNaN(d.getTime())) return null;
   return d.toISOString();
@@ -297,7 +296,7 @@ function localDateTimeToISO(dateStr, timeStr) {
 function EmployeeRow({
   emp, dayMode, pickedDay, from, to, generalLimit, categoryColors,
   defaultOpen = false, allowUpdateDelete = false, onEdit, onDelete,
-  onEditSession, onCloseSession
+  onEditSession, onCloseSession, onDeleteSession
 }) {
   const theme = useTheme();
   const [open, setOpen] = useState(Boolean(defaultOpen));
@@ -444,11 +443,12 @@ function EmployeeRow({
                         <TableBody>
                           {sessions.map((s, i) => {
                             const ongoing = !s.end_time_local || s.end_time_local === "Ongoing";
+                            const isAuto = s.kind === "AutoBreak" || s.category === "AutoBreak";
                             return (
                               <TableRow key={String(i)}>
                                 <TableCell>
                                   <Chip
-                                    label={s.category || (s.kind === "AutoBreak" ? "AutoBreak" : "Uncategorized")}
+                                    label={s.category || (isAuto ? "AutoBreak" : "Uncategorized")}
                                     size="small"
                                     sx={{
                                       fontWeight: 600,
@@ -461,7 +461,7 @@ function EmployeeRow({
                                           ? "warning.main"
                                           : s.category === "Namaz"
                                           ? "success.main"
-                                          : s.category === "AutoBreak" || s.kind === "AutoBreak"
+                                          : isAuto
                                           ? "error.main"
                                           : "grey.600")
                                     }}
@@ -481,19 +481,19 @@ function EmployeeRow({
                                     py: 1
                                   }}
                                 >
-                                  {s.reason || (s.kind === "AutoBreak" ? "System Power Off / Startup" : "-")}
+                                  {s.reason || (isAuto ? "System Power Off / Startup" : "-")}
                                 </TableCell>
 
                                 <TableCell>
-                                  {s.category === "AutoBreak" || s.kind === "AutoBreak"
+                                  {isAuto
                                     ? (Number(s.duration || 0)).toFixed(1) + " min"
                                     : (s.duration || 0) + " min"}
                                 </TableCell>
 
                                 <TableCell align="center">
                                   {allowUpdateDelete && (
-                                    <Box display="flex" gap={1} justifyContent="center">
-                                      {s.kind !== "AutoBreak" && (
+                                    <Box display="flex" gap={1} justifyContent="center" flexWrap="wrap">
+                                      {!isAuto && (
                                         <Button size="small" variant="outlined" onClick={() => onEditSession(emp, s)}>
                                           Edit
                                         </Button>
@@ -501,6 +501,17 @@ function EmployeeRow({
                                       {ongoing && (
                                         <Button size="small" color="warning" variant="contained" onClick={() => onCloseSession(s)}>
                                           Close Now
+                                        </Button>
+                                      )}
+                                      {/* NEW: Delete (Idle only) */}
+                                      {!isAuto && (
+                                        <Button
+                                          size="small"
+                                          color="error"
+                                          variant="contained"
+                                          onClick={() => onDeleteSession(s)}
+                                        >
+                                          Delete
                                         </Button>
                                       )}
                                     </Box>
@@ -571,14 +582,14 @@ export default function Employees() {
   });
   const [employeeFilter, setEmployeeFilter] = useState("all");
 
-  // NEW: gate for update/delete visibility
+  // gate for update/delete visibility
   const [allowUpdateDelete, setAllowUpdateDelete] = useState(false);
 
   // Update modal (Employee)
   const [editOpen, setEditOpen] = useState(false);
   const [editValues, setEditValues] = useState({ id: "", name: "", department: "", shift_start: "", shift_end: "" });
 
-  // Update modal (Session/Activity) — now includes date/time
+  // Update modal (Session/Activity) — with date/time
   const [editSessOpen, setEditSessOpen] = useState(false);
   const [editSessValues, setEditSessValues] = useState({
     id: "", kind: "Idle", reason: "", category: "General",
@@ -626,10 +637,7 @@ export default function Employees() {
   useEffect(() => {
     fetchEmployees();
     fetchConfig();
-
-    // Check gate once on mount
     checkUpdateGate().then(setAllowUpdateDelete);
-
     const interval = setInterval(fetchEmployees, 60000);
     return () => clearInterval(interval);
   }, []);
@@ -742,9 +750,8 @@ export default function Employees() {
     }
   }
 
-  /* ======== Activity Log Edit/Close ======== */
+  /* ======== Activity Log Edit/Close/Delete ======== */
   function onEditSessionOpen(_emp, session) {
-    // Only Idle sessions editable for reason/category/time
     const startISO = session.idle_start || null;
     const endISO = session.idle_end || null;
     setEditSessValues({
@@ -799,6 +806,26 @@ export default function Employees() {
       await fetchEmployees();
     } catch (e) {
       alert("Close failed: " + (e?.response?.data?.error || e.message));
+    }
+  }
+
+  // NEW: Delete activity (Idle only, per your backend)
+  async function onDeleteSessionNow(session) {
+    try {
+      const id = session._id || session.id;
+      const isAuto = session.kind === "AutoBreak" || session.category === "AutoBreak";
+      if (isAuto) {
+        alert("AutoBreak rows cannot be deleted from the frontend.");
+        return;
+      }
+      if (!window.confirm("Delete this activity log? This cannot be undone.")) return;
+      await axios.delete(`${API}/activities/${encodeURIComponent(id)}`, {
+        withCredentials: true,
+        timeout: 15000
+      });
+      await fetchEmployees();
+    } catch (e) {
+      alert("Delete failed: " + (e?.response?.data?.error || e.message));
     }
   }
 
@@ -1107,16 +1134,6 @@ export default function Employees() {
         1: { halign: "left", cellWidth: 140 },
         2: { halign: "left", cellWidth: 120 }
       },
-      didParseCell: (data) => {
-        if (data.section === "body" && (data.column.index === 8 || data.column.index === 9)) {
-          const val = String(data.cell.raw || "-");
-          if (val.indexOf("+") === 0) {
-            data.cell.styles.fillColor = [254, 226, 226];
-            data.cell.styles.textColor = [220, 38, 38];
-            data.cell.styles.fontStyle = "bold";
-          }
-        }
-      }
     });
 
     const fname = allOrSelected === "all"
@@ -1315,6 +1332,7 @@ export default function Employees() {
                 onDelete={onDeleteEmp}
                 onEditSession={onEditSessionOpen}
                 onCloseSession={onCloseSessionNow}
+                onDeleteSession={onDeleteSessionNow} // << NEW
               />
             ))}
           </TableBody>
@@ -1431,4 +1449,5 @@ export default function Employees() {
     </Box>
   );
 }
+
 
