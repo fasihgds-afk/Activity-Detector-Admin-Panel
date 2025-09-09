@@ -12,6 +12,8 @@ import axios from "axios";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
+import { getToken, getRole, getSelfEmpId } from "../auth";
+
 /* =========================
    API base
    ========================= */
@@ -192,7 +194,7 @@ function hmToMinutes(hhmm) {
   const parts = (hhmm || "").split(":").map(Number);
   const h = parts[0];
   const m = parts[1];
-  return Number.isNaN(h) || Number.isNaN(m ? m : 0) ? null : h * 60 + (m || 0);
+  return Number.isNaN(h) || Number.isNaN(m) ? null : h * 60 + m;
 }
 function isInShiftNow(shiftStart, shiftEnd) {
   const nowHM = karachiNowHM();
@@ -249,22 +251,6 @@ function getStatusForEmp(emp, ctx) {
   return computeDbAwareStatus(emp, ctx) || computeFallbackStatus(emp, ctx);
 }
 
-/* =========================
-   Update gate: only show update/delete if /update exists and is directly accessible (no redirect)
-   ========================= */
-async function checkUpdateGate() {
-  try {
-    const res = await fetch(`${API}/update`, {
-      method: "GET",
-      credentials: "include",
-      redirect: "manual",
-    });
-    return res.status >= 200 && res.status < 300;
-  } catch {
-    return false;
-  }
-}
-
 /* ---------- date+time helpers for dialog ---------- */
 function toInputDate(iso) {
   if (!iso) return "";
@@ -284,7 +270,8 @@ function toInputTime(iso) {
 }
 function localDateTimeToISO(dateStr, timeStr) {
   if (!dateStr || !timeStr) return null;
-  const safeTime = timeStr.length === 5 ? `${timeStr}:00` : timeStr;
+  // Build a local Date and return UTC ISO
+  const safeTime = timeStr.length === 5 ? `${timeStr}:00` : timeStr; // allow HH:mm
   const d = new Date(`${dateStr}T${safeTime}`);
   if (isNaN(d.getTime())) return null;
   return d.toISOString();
@@ -295,7 +282,7 @@ function localDateTimeToISO(dateStr, timeStr) {
    ========================= */
 function EmployeeRow({
   emp, dayMode, pickedDay, from, to, generalLimit, categoryColors,
-  defaultOpen = false, allowUpdateDelete = false, onEdit, onDelete,
+  defaultOpen = false, canEdit = false, onEdit, onDelete,
   onEditSession, onCloseSession, onDeleteSession
 }) {
   const theme = useTheme();
@@ -365,7 +352,7 @@ function EmployeeRow({
               </IconButton>
             </Tooltip>
 
-            {allowUpdateDelete && (
+            {canEdit && (
               <>
                 <Button size="small" variant="outlined" onClick={() => onEdit(emp)}>Update</Button>
                 <Button size="small" color="error" variant="contained" onClick={() => onDelete(emp)}>Delete</Button>
@@ -437,7 +424,7 @@ function EmployeeRow({
                             <TableCell>End Time</TableCell>
                             <TableCell>Reason</TableCell>
                             <TableCell>Duration (min)</TableCell>
-                            <TableCell align="center">{allowUpdateDelete ? "Actions" : ""}</TableCell>
+                            <TableCell align="center">{canEdit ? "Actions" : ""}</TableCell>
                           </TableRow>
                         </TableHead>
                         <TableBody>
@@ -491,26 +478,20 @@ function EmployeeRow({
                                 </TableCell>
 
                                 <TableCell align="center">
-                                  {allowUpdateDelete && (
+                                  {canEdit && (
                                     <Box display="flex" gap={1} justifyContent="center" flexWrap="wrap">
                                       {!isAuto && (
                                         <Button size="small" variant="outlined" onClick={() => onEditSession(emp, s)}>
                                           Edit
                                         </Button>
                                       )}
-                                      {ongoing && (
+                                      {ongoing && !isAuto && (
                                         <Button size="small" color="warning" variant="contained" onClick={() => onCloseSession(s)}>
                                           Close Now
                                         </Button>
                                       )}
-                                      {/* NEW: Delete (Idle only) */}
                                       {!isAuto && (
-                                        <Button
-                                          size="small"
-                                          color="error"
-                                          variant="contained"
-                                          onClick={() => onDeleteSession(s)}
-                                        >
+                                        <Button size="small" color="error" variant="contained" onClick={() => onDeleteSession(s)}>
                                           Delete
                                         </Button>
                                       )}
@@ -573,6 +554,15 @@ function EmployeeRow({
 export default function Employees() {
   const theme = useTheme();
 
+  const token = getToken();
+  const role = getRole();                 // 'employee' | 'admin' | 'superadmin'
+  const isEmployee = role === "employee";
+  const canDownload = role === "admin" || role === "superadmin";
+  const canEdit = role === "superadmin";
+
+  // attach token to axios for all calls
+  axios.defaults.headers.common["Authorization"] = token ? `Bearer ${token}` : "";
+
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
   const [config, setConfig] = useState({
@@ -582,14 +572,11 @@ export default function Employees() {
   });
   const [employeeFilter, setEmployeeFilter] = useState("all");
 
-  // gate for update/delete visibility
-  const [allowUpdateDelete, setAllowUpdateDelete] = useState(false);
-
   // Update modal (Employee)
   const [editOpen, setEditOpen] = useState(false);
   const [editValues, setEditValues] = useState({ id: "", name: "", department: "", shift_start: "", shift_end: "" });
 
-  // Update modal (Session/Activity) — with date/time
+  // Update modal (Session/Activity)
   const [editSessOpen, setEditSessOpen] = useState(false);
   const [editSessValues, setEditSessValues] = useState({
     id: "", kind: "Idle", reason: "", category: "General",
@@ -613,12 +600,15 @@ export default function Employees() {
   /* ----- API fetch ----- */
   const fetchEmployees = async () => {
     try {
-      const res = await axios.get(API + "/employees", { timeout: 20000, withCredentials: true });
+      const res = await axios.get(API + "/employees", { timeout: 20000 });
       const arr = Array.isArray(res.data) ? res.data : res.data.employees || [];
       setEmployees(arr);
       const gl = res.data && res.data.settings ? res.data.settings.general_idle_limit : undefined;
       if (typeof gl === "number") {
         setConfig((c) => ({ ...c, generalIdleLimit: gl }));
+      }
+      if (res.data?.categoryColors) {
+        setConfig((c) => ({ ...c, categoryColors: res.data.categoryColors }));
       }
     } catch (e) {
       console.error("Error fetching employees:", e);
@@ -627,7 +617,7 @@ export default function Employees() {
 
   const fetchConfig = async () => {
     try {
-      const res = await axios.get(API + "/config", { timeout: 15000, withCredentials: true });
+      const res = await axios.get(API + "/config", { timeout: 15000 });
       setConfig((c) => ({ ...c, ...(res.data || {}) }));
     } catch (e) {
       console.warn("Config fetch failed (using defaults).", e && e.message ? e.message : e);
@@ -637,7 +627,6 @@ export default function Employees() {
   useEffect(() => {
     fetchEmployees();
     fetchConfig();
-    checkUpdateGate().then(setAllowUpdateDelete);
     const interval = setInterval(fetchEmployees, 60000);
     return () => clearInterval(interval);
   }, []);
@@ -663,6 +652,15 @@ export default function Employees() {
     setFrom(start);
     setTo(end);
   }, [mode, month]);
+
+  // Lock dropdown for employees
+  useEffect(() => {
+    if (isEmployee) {
+      setEmployeeFilter(getSelfEmpId() || "all");
+    } else {
+      setEmployeeFilter("all");
+    }
+  }, [isEmployee]);
 
   const filtered = useMemo(() => {
     let list = Array.isArray(employees) ? employees : [];
@@ -730,7 +728,7 @@ export default function Employees() {
       const { id, name, department, shift_start, shift_end } = editValues;
       await axios.put(`${API}/employees/${encodeURIComponent(id)}`, {
         name, department, shift_start, shift_end
-      }, { withCredentials: true, timeout: 15000 });
+      }, { timeout: 15000 });
       setEditOpen(false);
       await fetchEmployees();
     } catch (e) {
@@ -743,7 +741,7 @@ export default function Employees() {
     if (!id) return;
     if (!window.confirm(`Delete employee "${emp.name}"? This cannot be undone.`)) return;
     try {
-      await axios.delete(`${API}/employees/${encodeURIComponent(id)}`, { withCredentials: true, timeout: 15000 });
+      await axios.delete(`${API}/employees/${encodeURIComponent(id)}`, { timeout: 15000 });
       await fetchEmployees();
     } catch (e) {
       alert("Delete failed: " + (e?.response?.data?.error || e.message));
@@ -775,7 +773,6 @@ export default function Employees() {
         setEditSessOpen(false);
         return;
       }
-
       const idle_start = localDateTimeToISO(startDate, startTime);
       const idle_end = (endDate && endTime) ? localDateTimeToISO(endDate, endTime) : null;
 
@@ -786,7 +783,7 @@ export default function Employees() {
 
       await axios.put(`${API}/activities/${encodeURIComponent(id)}`, {
         reason, category, idle_start, idle_end
-      }, { withCredentials: true, timeout: 15000 });
+      }, { timeout: 15000 });
 
       setEditSessOpen(false);
       await fetchEmployees();
@@ -798,129 +795,25 @@ export default function Employees() {
   async function onCloseSessionNow(session) {
     try {
       const id = session._id || session.id;
-      const kind = session.kind || (session.category === "AutoBreak" ? "AutoBreak" : "Idle");
-      const url = kind === "AutoBreak"
-        ? `${API}/autobreaks/${encodeURIComponent(id)}/end`
-        : `${API}/activities/${encodeURIComponent(id)}/end`;
-      await axios.put(url, {}, { withCredentials: true, timeout: 15000 });
+      await axios.put(`${API}/activities/${encodeURIComponent(id)}/end`, {}, { timeout: 15000 });
       await fetchEmployees();
     } catch (e) {
       alert("Close failed: " + (e?.response?.data?.error || e.message));
     }
   }
 
-  // NEW: Delete activity (Idle only, per your backend)
-  async function onDeleteSessionNow(session) {
+  async function onDeleteSession(session) {
     try {
       const id = session._id || session.id;
-      const isAuto = session.kind === "AutoBreak" || session.category === "AutoBreak";
-      if (isAuto) {
-        alert("AutoBreak rows cannot be deleted from the frontend.");
-        return;
-      }
       if (!window.confirm("Delete this activity log? This cannot be undone.")) return;
-      await axios.delete(`${API}/activities/${encodeURIComponent(id)}`, {
-        withCredentials: true,
-        timeout: 15000
-      });
+      await axios.delete(`${API}/activities/${encodeURIComponent(id)}`, { timeout: 15000 });
       await fetchEmployees();
     } catch (e) {
       alert("Delete failed: " + (e?.response?.data?.error || e.message));
     }
   }
 
-  /* ---------- Downloads (existing) ---------- */
-  function downloadPDFDailyDetailSelected() {
-    if (employeeFilter === "all" || !filtered.length || mode !== "day") return;
-
-    const emp = filtered[0];
-    const empName = cleanName(emp.name);
-    const sessions = sessionsForEmp(emp).sort(
-      (a, b) => new Date(a.idle_start || 0) - new Date(b.idle_start || 0)
-    );
-    const sums = calcTotals(sessions);
-
-    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
-    const pageW = doc.internal.pageSize.getWidth();
-
-    const brand = [59, 130, 246];
-    doc.setFillColor(31, 41, 55);
-    doc.rect(0, 0, pageW, 64, "F");
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(20);
-    doc.setTextColor("#fff");
-    doc.text("Daily Report — " + empName, 40, 26);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(11);
-    doc.text(
-      "Dept: " +
-        (emp.department || "-") +
-        "   Shift: " +
-        emp.shift_start +
-        " – " +
-        emp.shift_end +
-        "   Day: " +
-        day +
-        "   TZ: " +
-        ZONE,
-      40,
-      46
-    );
-
-    doc.setFillColor(brand[0], brand[1], brand[2]);
-    doc.roundedRect(40, 84, 340, 26, 6, 6, "F");
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(12);
-    doc.setTextColor("#fff");
-    doc.text(day + " — " + emp.shift_start + " – " + emp.shift_end, 50, 101);
-
-    const body = sessions.map((s) => [
-      s.category || "-",
-      s.start_time_local || "-",
-      s.end_time_local || "Ongoing",
-      s.reason || "-",
-      s.category === "AutoBreak" ? Number(s.duration || 0).toFixed(1) : s.duration || 0
-    ]);
-
-    autoTable(doc, {
-      head: [["Category", "Start Time", "End Time", "Reason", "Duration (min)"]],
-      body: body,
-      startY: 120,
-      margin: { left: 40, right: 40 },
-      styles: { fontSize: 10, cellPadding: 6, halign: "center", valign: "middle" },
-      columnStyles: { 0: { cellWidth: 90 }, 3: { halign: "left", cellWidth: 420, overflow: "linebreak" } },
-      headStyles: { fillColor: brand, textColor: 255, halign: "center" },
-      theme: "striped",
-      alternateRowStyles: { fillColor: [248, 250, 252] }
-    });
-
-    const y = doc.lastAutoTable.finalY + 18;
-    const boxW = 190;
-    const boxH = 68;
-    const gap = 16;
-    const blocks = [
-      ["Total Time", Number(sums.total).toFixed(1) + " min", [234, 179, 8]],
-      ["Official Break Time", sums.official + " min", [59, 130, 246]],
-      ["Namaz Break Time", sums.namaz + " min", [16, 185, 129]],
-      ["General Break Time", sums.general + " min", sums.general > effectiveGeneralLimit() ? [239, 68, 68] : [107, 114, 128]]
-    ];
-    blocks.forEach((b, i) => {
-      const x = 40 + i * (boxW + gap);
-      doc.setDrawColor(229, 231, 235);
-      doc.setFillColor(247, 249, 251);
-      doc.roundedRect(x, y, boxW, boxH, 8, 8, "FD");
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(11);
-      doc.setTextColor(b[2][0], b[2][1], b[2][2]);
-      doc.text(b[0], x + 12, y + 22);
-      doc.setFontSize(16);
-      doc.setTextColor(17, 24, 39);
-      doc.text(b[1], x + 12, y + 46);
-    });
-
-    doc.save("daily_" + slugName(empName) + "_" + day + ".pdf");
-  }
-
+  /* ---------- Downloads (admin/superadmin only) ---------- */
   function summarizeReasonsByCategory(sessions) {
     const ORDER = ["General", "Namaz", "Official", "AutoBreak"];
     const OTHER = "Other";
@@ -1008,11 +901,6 @@ export default function Employees() {
       doc.setFontSize(10);
       doc.text("Range: " + label + "   |   TZ: " + ZONE + "   |   " + limitsText, pageW - 40, 26, { align: "right" });
     };
-    const footer = (data) => {
-      doc.setFontSize(9);
-      doc.setTextColor(gray600);
-      doc.text("Page " + data.pageNumber, pageW / 2, doc.internal.pageSize.getHeight() - 14, { align: "center" });
-    };
 
     const body = collectReportRowsWithReasons();
     const headers = [
@@ -1040,23 +928,7 @@ export default function Employees() {
         7: { cellWidth: 60 },
         8: { cellWidth: "auto", overflow: "linebreak", minCellWidth: 220 }
       },
-      didParseCell: (data) => {
-        if (data.section === "body" && [3, 4, 5, 6, 7].indexOf(data.column.index) >= 0) {
-          data.cell.styles.fontStyle = "bold";
-        }
-        if (data.section === "body") {
-          if (data.column.index === 4) {
-            const v = Number(data.cell.raw || 0);
-            if (v > gCap) { data.cell.styles.fillColor = [255, 237, 213]; data.cell.styles.textColor = [194, 65, 12]; }
-          }
-          if (data.column.index === 5) {
-            const v = Number(data.cell.raw || 0);
-            if (v > nCap) { data.cell.styles.fillColor = [254, 226, 226]; data.cell.styles.textColor = [220, 38, 38]; }
-          }
-        }
-      },
-      didDrawPage: (data) => { header(); footer(data); },
-      startY: 84
+      didDrawPage: () => { header(); }
     });
 
     const fileLabel = mode === "day" ? day : from.split("-").join("") + "_" + to.split("-").join("");
@@ -1133,7 +1005,7 @@ export default function Employees() {
       columnStyles: {
         1: { halign: "left", cellWidth: 140 },
         2: { halign: "left", cellWidth: 120 }
-      },
+      }
     });
 
     const fname = allOrSelected === "all"
@@ -1171,6 +1043,97 @@ export default function Employees() {
     return downloadPDFDailySummaryAll();
   }
 
+  function downloadPDFDailyDetailSelected() {
+    if (employeeFilter === "all" || !filtered.length || mode !== "day") return;
+
+    const emp = filtered[0];
+    const empName = cleanName(emp.name);
+    const sessions = sessionsForEmp(emp).sort(
+      (a, b) => new Date(a.idle_start || 0) - new Date(b.idle_start || 0)
+    );
+    const sums = calcTotals(sessions);
+
+    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
+    const pageW = doc.internal.pageSize.getWidth();
+
+    const brand = [59, 130, 246];
+    doc.setFillColor(31, 41, 55);
+    doc.rect(0, 0, pageW, 64, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(20);
+    doc.setTextColor("#fff");
+    doc.text("Daily Report — " + empName, 40, 26);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(11);
+    doc.text(
+      "Dept: " +
+        (emp.department || "-") +
+        "   Shift: " +
+        emp.shift_start +
+        " – " +
+        emp.shift_end +
+        "   Day: " +
+        day +
+        "   TZ: " +
+        ZONE,
+      40,
+      46
+    );
+
+    doc.setFillColor(brand[0], brand[1], brand[2]);
+    doc.roundedRect(40, 84, 340, 26, 6, 6, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(12);
+    doc.setTextColor("#fff");
+    doc.text(day + " — " + emp.shift_start + " – " + emp.shift_end, 50, 101);
+
+    const body = sessions.map((s) => [
+      s.category || "-",
+      s.start_time_local || "-",
+      s.end_time_local || "Ongoing",
+      s.reason || "-",
+      s.category === "AutoBreak" ? Number(s.duration || 0).toFixed(1) : s.duration || 0
+    ]);
+
+    autoTable(doc, {
+      head: [["Category", "Start Time", "End Time", "Reason", "Duration (min)"]],
+      body: body,
+      startY: 120,
+      margin: { left: 40, right: 40 },
+      styles: { fontSize: 10, cellPadding: 6, halign: "center", valign: "middle" },
+      columnStyles: { 0: { cellWidth: 90 }, 3: { halign: "left", cellWidth: 420, overflow: "linebreak" } },
+      headStyles: { fillColor: brand, textColor: 255, halign: "center" },
+      theme: "striped",
+      alternateRowStyles: { fillColor: [248, 250, 252] }
+    });
+
+    const y = (doc.lastAutoTable?.finalY || 120) + 18;
+    const boxW = 190;
+    const boxH = 68;
+    const gap = 16;
+    const blocks = [
+      ["Total Time", Number(sums.total).toFixed(1) + " min", [234, 179, 8]],
+      ["Official Break Time", sums.official + " min", [59, 130, 246]],
+      ["Namaz Break Time", sums.namaz + " min", [16, 185, 129]],
+      ["General Break Time", sums.general + " min", sums.general > effectiveGeneralLimit() ? [239, 68, 68] : [107, 114, 128]]
+    ];
+    blocks.forEach((b, i) => {
+      const x = 40 + i * (boxW + gap);
+      doc.setDrawColor(229, 231, 235);
+      doc.setFillColor(247, 249, 251);
+      doc.roundedRect(x, y, boxW, boxH, 8, 8, "FD");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(11);
+      doc.setTextColor(b[2][0], b[2][1], b[2][2]);
+      doc.text(b[0], x + 12, y + 22);
+      doc.setFontSize(16);
+      doc.setTextColor(17, 24, 39);
+      doc.text(b[1], x + 12, y + 46);
+    });
+
+    doc.save("daily_" + slugName(empName) + "_" + day + ".pdf");
+  }
+
   const gDaily = config.generalIdleLimit == null ? 60 : config.generalIdleLimit;
   const nDaily = config.namazLimit == null ? 50 : config.namazLimit;
   const headerGradient = "linear-gradient(90deg, " + theme.palette.primary.main + ", " + theme.palette.success.main + ")";
@@ -1190,6 +1153,7 @@ export default function Employees() {
         <Select
           size="small"
           value={employeeFilter}
+          disabled={isEmployee}
           onChange={(e) => setEmployeeFilter(e.target.value)}
           sx={{ minWidth: 200 }}
         >
@@ -1238,68 +1202,72 @@ export default function Employees() {
 
         <Box flex={1} />
 
-        <Button
-          variant="contained"
-          startIcon={<Download />}
-          onClick={(e) => setAnchorEl(e.currentTarget)}
-        >
-          {isSingleSelected ? "Download: " + selectedName : "Download Report"}
-        </Button>
-        <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
-          <MenuItem onClick={() => {
-            setAnchorEl(null);
-            if (confirmDownload(quickLabel)) handleQuickDownload();
-          }}>
-            {"Quick — " + quickLabel}
-          </MenuItem>
+        {canDownload && (
+          <>
+            <Button
+              variant="contained"
+              startIcon={<Download />}
+              onClick={(e) => setAnchorEl(e.currentTarget)}
+            >
+              {isSingleSelected ? "Download: " + selectedName : "Download Report"}
+            </Button>
+            <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
+              <MenuItem onClick={() => {
+                setAnchorEl(null);
+                if (confirmDownload(quickLabel)) handleQuickDownload();
+              }}>
+                {"Quick — " + quickLabel}
+              </MenuItem>
 
-          <MenuItem onClick={() => {
-            setAnchorEl(null);
-            if (confirmDownload("Daily — All Employees")) downloadPDFDailySummaryAll();
-          }}>
-            Daily — All Employees
-          </MenuItem>
-          <MenuItem
-            disabled={!(mode === "day" && isSingleSelected)}
-            onClick={() => {
-              setAnchorEl(null);
-              if (confirmDownload("Daily — " + (selectedName || "Selected Employee"))) downloadPDFDailyDetailSelected();
-            }}
-          >
-            {"Daily — " + (selectedName || "Selected Employee")}
-          </MenuItem>
+              <MenuItem onClick={() => {
+                setAnchorEl(null);
+                if (confirmDownload("Daily — All Employees")) downloadPDFDailySummaryAll();
+              }}>
+                Daily — All Employees
+              </MenuItem>
+              <MenuItem
+                disabled={!(mode === "day" && isSingleSelected)}
+                onClick={() => {
+                  setAnchorEl(null);
+                  if (confirmDownload("Daily — " + (selectedName || "Selected Employee"))) downloadPDFDailyDetailSelected();
+                }}
+              >
+                {"Daily — " + (selectedName || "Selected Employee")}
+              </MenuItem>
 
-          <MenuItem
-            disabled={mode !== "month"}
-            onClick={() => {
-              setAnchorEl(null);
-              if (confirmDownload("Monthly — All Employees")) downloadPDFMonthlyTotals("all");
-            }}
-          >
-            Monthly — All Employees
-          </MenuItem>
-          <MenuItem
-            disabled={!(mode === "month" && isSingleSelected)}
-            onClick={() => {
-              setAnchorEl(null);
-              if (confirmDownload("Monthly — " + (selectedName || "Selected Employee"))) downloadPDFMonthlyTotals("one");
-            }}
-          >
-            {"Monthly — " + (selectedName || "Selected Employee")}
-          </MenuItem>
+              <MenuItem
+                disabled={mode !== "month"}
+                onClick={() => {
+                  setAnchorEl(null);
+                  if (confirmDownload("Monthly — All Employees")) downloadPDFMonthlyTotals("all");
+                }}
+              >
+                Monthly — All Employees
+              </MenuItem>
+              <MenuItem
+                disabled={!(mode === "month" && isSingleSelected)}
+                onClick={() => {
+                  setAnchorEl(null);
+                  if (confirmDownload("Monthly — " + (selectedName || "Selected Employee"))) downloadPDFMonthlyTotals("one");
+                }}
+              >
+                {"Monthly — " + (selectedName || "Selected Employee")}
+              </MenuItem>
 
-          <MenuItem onClick={() => {
-            setAnchorEl(null);
-            if (confirmDownload("Excel — Summary")) downloadXLS();
-          }}>
-            Excel — Summary (with Reasons)
-          </MenuItem>
-        </Menu>
+              <MenuItem onClick={() => {
+                setAnchorEl(null);
+                if (confirmDownload("Excel — Summary")) downloadXLS();
+              }}>
+                Excel — Summary (with Reasons)
+              </MenuItem>
+            </Menu>
+          </>
+        )}
       </Box>
 
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
         {mode === "day" ? "Range: " + day : "Range: " + from + " → " + to}
-        &nbsp; | &nbsp; {isSingleSelected ? "Employee: " + selectedName : "All Employees"}
+        &nbsp; | &nbsp; {employeeFilter !== "all" ? "Employee: " + selectedName : "All Employees"}
         &nbsp; | &nbsp; General: {gDaily}m/day • Namaz: {nDaily}m/day
         &nbsp; | &nbsp; TZ: {ZONE}
       </Typography>
@@ -1327,12 +1295,12 @@ export default function Employees() {
                 generalLimit={effectiveGeneralLimit()}
                 categoryColors={config.categoryColors}
                 defaultOpen={filtered.length === 1}
-                allowUpdateDelete={allowUpdateDelete}
+                canEdit={canEdit}
                 onEdit={onEditOpen}
                 onDelete={onDeleteEmp}
                 onEditSession={onEditSessionOpen}
                 onCloseSession={onCloseSessionNow}
-                onDeleteSession={onDeleteSessionNow} // << NEW
+                onDeleteSession={onDeleteSession}
               />
             ))}
           </TableBody>
@@ -1376,7 +1344,7 @@ export default function Employees() {
         </DialogActions>
       </Dialog>
 
-      {/* Edit Activity Dialog (Idle) — with time fields */}
+      {/* Edit Activity Dialog */}
       <Dialog open={editSessOpen} onClose={() => setEditSessOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Update Activity Log</DialogTitle>
         <DialogContent dividers>
@@ -1449,5 +1417,3 @@ export default function Employees() {
     </Box>
   );
 }
-
-
