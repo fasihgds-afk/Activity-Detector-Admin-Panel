@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
 import { ThemeProvider, CssBaseline } from "@mui/material";
-import { createAppTheme } from "./theme";   // ✅ correct import
+import { createAppTheme } from "./theme";
 
 import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
@@ -9,15 +9,24 @@ import Employees from "./pages/Employees";
 import Reports from "./pages/Reports";
 import Login from "./pages/Login";
 
+import { getToken, getRole } from "./auth";
+
 function PrivateRoute({ children }) {
-  const isAuth = localStorage.getItem("auth") === "true";
-  return isAuth ? children : <Navigate to="/login" />;
+  const hasToken = !!getToken();
+  return hasToken ? children : <Navigate to="/login" replace />;
+}
+
+function RoleRoute({ roles = [], children }) {
+  const hasToken = !!getToken();
+  const role = getRole();
+  if (!hasToken) return <Navigate to="/login" replace />;
+  if (roles.length && !roles.includes(role)) return <Navigate to="/employees" replace />;
+  return children;
 }
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(false);
-
-  const theme = createAppTheme(darkMode ? "dark" : "light"); // ✅ build theme
+  const theme = createAppTheme(darkMode ? "dark" : "light");
 
   return (
     <ThemeProvider theme={theme}>
@@ -51,16 +60,15 @@ export default function App() {
           <Route
             path="/reports"
             element={
-              <PrivateRoute>
+              <RoleRoute roles={["admin", "superadmin"]}>
                 <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
                   <Reports />
                 </Layout>
-              </PrivateRoute>
+              </RoleRoute>
             }
           />
 
-          {/* Redirect all unknown routes to login */}
-          <Route path="*" element={<Navigate to="/login" />} />
+          <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       </Router>
     </ThemeProvider>
