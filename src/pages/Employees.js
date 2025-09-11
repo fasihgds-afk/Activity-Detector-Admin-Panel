@@ -8,21 +8,15 @@ import {
 } from "@mui/material";
 import { useTheme, alpha } from "@mui/material/styles";
 import { KeyboardArrowDown, KeyboardArrowUp, AccessTime, Download } from "@mui/icons-material";
-import axios from "axios";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
-import { getToken, getRole, getSelfEmpId } from "../auth";
+import api from "../api";
+import { getRole, getSelfEmpId } from "../auth";
 
-/* =========================
-   API base
-   ========================= */
-const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
 const ZONE = "Asia/Karachi";
 
-/* =========================
-   Small helpers
-   ========================= */
+/* helpers */
 const pad = (n) => (n < 10 ? "0" + n : "" + n);
 const cleanName = (s) => (s || "").replace(/\s+/g, " ").trim();
 const slugName = (s) =>
@@ -37,52 +31,27 @@ function ymdInAsiaFromISO(iso) {
   try {
     const d = new Date(iso);
     const fmt = new Intl.DateTimeFormat("en-CA", {
-      timeZone: ZONE,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit"
+      timeZone: ZONE, year: "numeric", month: "2-digit", day: "2-digit"
     });
-    return fmt.format(d); // YYYY-MM-DD
-  } catch {
-    return null;
-  }
+    return fmt.format(d);
+  } catch { return null; }
 }
 
-// before 06:00 local → use previous day as “shift business day”
 function currentShiftYmd() {
-  const fmtYmd = new Intl.DateTimeFormat("en-CA", {
-    timeZone: ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  });
-  const hourFmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: ZONE,
-    hour: "2-digit",
-    hourCycle: "h23"
-  });
-
+  const fmtYmd = new Intl.DateTimeFormat("en-CA", { timeZone: ZONE, year: "numeric", month: "2-digit", day: "2-digit" });
+  const hourFmt = new Intl.DateTimeFormat("en-US", { timeZone: ZONE, hour: "2-digit", hourCycle: "h23" });
   const now = new Date();
   const ymd = fmtYmd.format(now);
   const hour = parseInt(hourFmt.format(now), 10);
   if (hour >= 6) return ymd;
 
   const parts = ymd.split("-").map(Number);
-  const y = parts[0];
-  const m = parts[1];
-  const d = parts[2];
+  const y = parts[0]; const m = parts[1]; const d = parts[2];
   const dt = new Date(Date.UTC(y, m - 1, d));
   dt.setUTCDate(dt.getUTCDate() - 1);
-  return (
-    dt.getUTCFullYear() +
-    "-" +
-    pad(dt.getUTCMonth() + 1) +
-    "-" +
-    pad(dt.getUTCDate())
-  );
+  return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
 }
 
-// filter using shiftDate if present; else fall back to ISO start converted to Asia/Karachi
 function inPickedRange(shiftDate, mode, day, from, to, idleStartISO) {
   let sd = shiftDate;
   if (!sd) sd = ymdInAsiaFromISO(idleStartISO);
@@ -109,169 +78,20 @@ function calcTotals(sessions) {
 
 const toH1 = (min) => ((min || 0) / 60).toFixed(1);
 
-/* Parse shift strings like "6:00 PM" / "09:00" → minutes */
-function parseShiftToMinutes(str) {
-  if (!str) return null;
-  const s = String(str).trim().toUpperCase();
-  const parts = s.split(/\s+/);
-  if (parts.length === 2 && (parts[1] === "AM" || parts[1] === "PM")) {
-    let hm = parts[0].split(":").map(Number);
-    let h = hm[0];
-    const m = hm[1] || 0;
-    if (parts[1] === "PM" && h < 12) h += 12;
-    if (parts[1] === "AM" && h === 12) h = 0;
-    return h * 60 + m;
-  }
-  const hm2 = s.split(":").map(Number);
-  const h2 = hm2[0];
-  const m2 = hm2[1];
-  if (Number.isFinite(h2) && Number.isFinite(m2)) return h2 * 60 + m2;
-  return null;
-}
-function shiftSpanMinutes(shiftStart, shiftEnd) {
-  const s = parseShiftToMinutes(shiftStart);
-  const e = parseShiftToMinutes(shiftEnd);
-  if (s == null || e == null) return 9 * 60; // default 9h if malformed
-  return e >= s ? e - s : 24 * 60 - s + e; // handle cross midnight
-}
-
-/* =========================
-   Excel maker (Summary with Reasons-by-Category)
-   ========================= */
-function downloadXls(filename, headers, rows) {
-  const headerHtml = headers
-    .map(
-      (h) =>
-        '<th style="background:#1f2937;color:#fff;padding:10px 8px;border:1px solid #e5e7eb;text-align:center;font-weight:700">' +
-        h +
-        "</th>"
-    )
-    .join("");
-
-  const rowHtml = rows
-    .map((r) => {
-      const cells = r
-        .map((c, i) => {
-          const base =
-            "padding:8px;border:1px solid #e5e7eb;text-align:center;vertical-align:middle";
-          const wrap = /reason/i.test(headers[i])
-            ? "white-space:normal;max-width:520px"
-            : "white-space:nowrap";
-          return '<td style="' + base + ";" + wrap + '">' + String(c == null ? "" : c) + "</td>";
-        })
-        .join("");
-      return "<tr>" + cells + "</tr>";
-    })
-    .join("");
-
-  const html =
-    "<html><head><meta charset=\"utf-8\" />" +
-    "<style>table{border-collapse:collapse;font-family:Segoe UI,Arial;font-size:12px} thead tr th{position:sticky;top:0} td,th{word-break:break-word}</style>" +
-    "</head><body><table><thead><tr>" +
-    headerHtml +
-    "</tr></thead><tbody>" +
-    rowHtml +
-    "</tbody></table></body></html>";
-
-  const blob = new Blob([html], { type: "application/vnd.ms-excel" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename.slice(-4) === ".xls" ? filename : filename + ".xls";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-}
-
-/* =========================
-   Status helpers
-   ========================= */
-function karachiNowHM() {
-  const fmtH = new Intl.DateTimeFormat("en-GB", { timeZone: ZONE, hour: "2-digit", hourCycle: "h23" });
-  const fmtM = new Intl.DateTimeFormat("en-GB", { timeZone: ZONE, minute: "2-digit" });
-  return { h: parseInt(fmtH.format(new Date()), 10), m: parseInt(fmtM.format(new Date()), 10) };
-}
-function hmToMinutes(hhmm) {
-  const parts = (hhmm || "").split(":").map(Number);
-  const h = parts[0];
-  const m = parts[1];
-  return Number.isNaN(h) || Number.isNaN(m) ? null : h * 60 + m;
-}
-function isInShiftNow(shiftStart, shiftEnd) {
-  const nowHM = karachiNowHM();
-  const now = nowHM.h * 60 + nowHM.m;
-  const s = hmToMinutes(shiftStart);
-  const e = hmToMinutes(shiftEnd);
-  if (s == null || e == null) return false;
-  if (e >= s) return now >= s && now <= e;
-  return now >= s || now <= e; // crosses midnight
-}
-
-function computeDbAwareStatus(emp, ctx) {
-  const raw = (emp && emp.latest_status ? String(emp.latest_status) : "").trim().toLowerCase();
-  const sessions = Array.isArray(emp && emp.idle_sessions) ? emp.idle_sessions : [];
-  const ongoing = sessions
-    .filter((s) => inPickedRange(s.shiftDate, ctx.mode, ctx.day, ctx.from, ctx.to, s.idle_start))
-    .find((s) => !s.end_time_local || s.end_time_local === "Ongoing");
-  const onCat = ongoing && ongoing.category;
-
-  if (raw === "active" || raw === "online" || raw === "working") {
-    return { label: "Active", color: "success" };
-  }
-  if (raw === "idle") {
-    if (onCat) {
-      const color =
-        onCat === "Official" ? "info" :
-        onCat === "Namaz" ? "success" :
-        onCat === "AutoBreak" ? "error" :
-        "warning";
-      return { label: "On Break — " + onCat, color: color };
-    }
-    return null;
-  }
-  if (raw === "break" || raw === "on break" || raw === "paused") {
-    return { label: onCat ? "On Break — " + onCat : "On Break", color: "warning" };
-  }
-  if (raw === "offline") return { label: "Offline", color: "default" };
-  if (raw === "unknown" || !raw) return null;
-  return { label: emp.latest_status, color: "default" };
-}
-
-function computeFallbackStatus(emp, ctx) {
-  const inShift = isInShiftNow(emp && emp.shift_start, emp && emp.shift_end);
-  if (!inShift) return { label: "Off Shift", color: "default" };
-  const sessions = Array.isArray(emp && emp.idle_sessions) ? emp.idle_sessions : [];
-  const ongoing = sessions
-    .filter((s) => inPickedRange(s.shiftDate, ctx.mode, ctx.day, ctx.from, ctx.to, s.idle_start))
-    .some((s) => !s.end_time_local || s.end_time_local === "Ongoing");
-  if (ongoing) return { label: "On Break", color: "warning" };
-  return { label: "Active", color: "success" };
-}
-
-function getStatusForEmp(emp, ctx) {
-  return computeDbAwareStatus(emp, ctx) || computeFallbackStatus(emp, ctx);
-}
-
-/* ---------- date+time helpers for dialog ---------- */
+/* time helpers for dialog */
 function toInputDate(iso) {
   if (!iso) return "";
   const d = new Date(iso);
-  const yyyy = d.getFullYear();
-  const mm = pad(d.getMonth() + 1);
-  const dd = pad(d.getDate());
-  return `${yyyy}-${mm}-${dd}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 function toInputTime(iso) {
   if (!iso) return "";
   const d = new Date(iso);
-  const hh = pad(d.getHours());
-  const mi = pad(d.getMinutes());
-  const ss = pad(d.getSeconds());
-  return `${hh}:${mi}:${ss}`;
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 function localDateTimeToISO(dateStr, timeStr) {
   if (!dateStr || !timeStr) return null;
-  // Build a local Date and return UTC ISO
-  const safeTime = timeStr.length === 5 ? `${timeStr}:00` : timeStr; // allow HH:mm
+  const safeTime = timeStr.length === 5 ? `${timeStr}:00` : timeStr;
   const d = new Date(`${dateStr}T${safeTime}`);
   if (isNaN(d.getTime())) return null;
   return d.toISOString();
@@ -314,7 +134,62 @@ function EmployeeRow({
   const cardBase = (col, opLight = 0.12, opDark = 0.18) =>
     alpha(col, theme.palette.mode === "dark" ? opDark : opLight);
 
-  const status = getStatusForEmp(emp, { mode: dayMode, day: pickedDay, from: from, to: to });
+  function isInShiftNow(shiftStart, shiftEnd) {
+    const hm = (t) => {
+      const m = String(t || "").split(":").map(Number);
+      return Number.isNaN(m[0]) || Number.isNaN(m[1]) ? null : m[0] * 60 + m[1];
+    };
+    const now = new Date();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const s = hm(shiftStart); const e = hm(shiftEnd);
+    if (s == null || e == null) return false;
+    if (e >= s) return nowMin >= s && nowMin <= e;
+    return nowMin >= s || nowMin <= e;
+  }
+
+  function computeDbAwareStatus(emp, ctx) {
+    const raw = (emp && emp.latest_status ? String(emp.latest_status) : "").trim().toLowerCase();
+    const sessions = Array.isArray(emp && emp.idle_sessions) ? emp.idle_sessions : [];
+    const ongoing = sessions
+      .filter((s) => inPickedRange(s.shiftDate, ctx.mode, ctx.day, ctx.from, ctx.to, s.idle_start))
+      .find((s) => !s.end_time_local || s.end_time_local === "Ongoing");
+    const onCat = ongoing && ongoing.category;
+
+    if (raw === "active" || raw === "online" || raw === "working") return { label: "Active", color: "success" };
+    if (raw === "idle") {
+      if (onCat) {
+        const color =
+          onCat === "Official" ? "info" :
+          onCat === "Namaz" ? "success" :
+          onCat === "AutoBreak" ? "error" : "warning";
+        return { label: "On Break — " + onCat, color };
+      }
+      return null;
+    }
+    if (raw === "break" || raw === "on break" || raw === "paused") {
+      return { label: onCat ? "On Break — " + onCat : "On Break", color: "warning" };
+    }
+    if (raw === "offline") return { label: "Offline", color: "default" };
+    if (raw === "unknown" || !raw) return null;
+    return { label: emp.latest_status, color: "default" };
+  }
+
+  function computeFallbackStatus(emp, ctx) {
+    const inShift = isInShiftNow(emp && emp.shift_start, emp && emp.shift_end);
+    if (!inShift) return { label: "Off Shift", color: "default" };
+    const sessions = Array.isArray(emp && emp.idle_sessions) ? emp.idle_sessions : [];
+    const ongoing = sessions
+      .filter((s) => inPickedRange(s.shiftDate, ctx.mode, ctx.day, ctx.from, ctx.to, s.idle_start))
+      .some((s) => !s.end_time_local || s.end_time_local === "Ongoing");
+    if (ongoing) return { label: "On Break", color: "warning" };
+    return { label: "Active", color: "success" };
+  }
+
+  function getStatusForEmp(emp, ctx) {
+    return computeDbAwareStatus(emp, ctx) || computeFallbackStatus(emp, ctx);
+  }
+
+  const status = getStatusForEmp(emp, { mode: dayMode, day: pickedDay, from, to });
 
   return (
     <>
@@ -351,13 +226,6 @@ function EmployeeRow({
                 {open ? <KeyboardArrowUp /> : <KeyboardArrowDown />}
               </IconButton>
             </Tooltip>
-
-            {canEdit && (
-              <>
-                <Button size="small" variant="outlined" onClick={() => onEdit(emp)}>Update</Button>
-                <Button size="small" color="error" variant="contained" onClick={() => onDelete(emp)}>Delete</Button>
-              </>
-            )}
           </Box>
         </TableCell>
       </TableRow>
@@ -378,12 +246,12 @@ function EmployeeRow({
                 const sums = calcTotals(sessions);
                 const generalExceeded = sums.general > generalLimit;
 
-                const totalBg = cardBase(theme.palette.warning.main);
-                const officialBg = cardBase(theme.palette.info.main);
-                const namazBg = cardBase(theme.palette.success.main);
+                const totalBg = alpha(theme.palette.warning.main, theme.palette.mode === "dark" ? 0.18 : 0.12);
+                const officialBg = alpha(theme.palette.info.main, theme.palette.mode === "dark" ? 0.18 : 0.12);
+                const namazBg = alpha(theme.palette.success.main, theme.palette.mode === "dark" ? 0.18 : 0.12);
                 const generalBg = generalExceeded
-                  ? cardBase(theme.palette.error.main, 0.14, 0.24)
-                  : cardBase(theme.palette.success.main, 0.12, 0.18);
+                  ? alpha(theme.palette.error.main, 0.24)
+                  : alpha(theme.palette.success.main, theme.palette.mode === "dark" ? 0.18 : 0.12);
 
                 return (
                   <Card
@@ -397,7 +265,7 @@ function EmployeeRow({
                         theme.palette.mode === "dark" ? 0.6 : 1
                       ),
                       border: "1px solid",
-                      borderColor: trackBorder
+                      borderColor: alpha(theme.palette.divider, 0.4)
                     }}
                   >
                     <CardContent>
@@ -424,7 +292,7 @@ function EmployeeRow({
                             <TableCell>End Time</TableCell>
                             <TableCell>Reason</TableCell>
                             <TableCell>Duration (min)</TableCell>
-                            <TableCell align="center">{canEdit ? "Actions" : ""}</TableCell>
+                            <TableCell align="center"></TableCell>
                           </TableRow>
                         </TableHead>
                         <TableBody>
@@ -456,8 +324,6 @@ function EmployeeRow({
                                 </TableCell>
                                 <TableCell>{s.start_time_local || "-"}</TableCell>
                                 <TableCell>{s.end_time_local || "Ongoing"}</TableCell>
-
-                                {/* REASON WRAPS ON MULTIPLE LINES */}
                                 <TableCell
                                   sx={{
                                     whiteSpace: "normal",
@@ -470,33 +336,13 @@ function EmployeeRow({
                                 >
                                   {s.reason || (isAuto ? "System Power Off / Startup" : "-")}
                                 </TableCell>
-
                                 <TableCell>
                                   {isAuto
                                     ? (Number(s.duration || 0)).toFixed(1) + " min"
                                     : (s.duration || 0) + " min"}
                                 </TableCell>
-
                                 <TableCell align="center">
-                                  {canEdit && (
-                                    <Box display="flex" gap={1} justifyContent="center" flexWrap="wrap">
-                                      {!isAuto && (
-                                        <Button size="small" variant="outlined" onClick={() => onEditSession(emp, s)}>
-                                          Edit
-                                        </Button>
-                                      )}
-                                      {ongoing && !isAuto && (
-                                        <Button size="small" color="warning" variant="contained" onClick={() => onCloseSession(s)}>
-                                          Close Now
-                                        </Button>
-                                      )}
-                                      {!isAuto && (
-                                        <Button size="small" color="error" variant="contained" onClick={() => onDeleteSession(s)}>
-                                          Delete
-                                        </Button>
-                                      )}
-                                    </Box>
-                                  )}
+                                  {/* actions hidden for non-admins in this simplified screen */}
                                 </TableCell>
                               </TableRow>
                             );
@@ -507,7 +353,7 @@ function EmployeeRow({
                       <Box mt={2}>
                         <Grid container spacing={2}>
                           <Grid item xs={12} md={3}>
-                            <Card sx={{ p: 2, borderRadius: 3, bgcolor: totalBg, border: "1px solid", borderColor: trackBorder }}>
+                            <Card sx={{ p: 2, borderRadius: 3, bgcolor: totalBg, border: "1px solid", borderColor: alpha(theme.palette.divider, 0.4) }}>
                               <Typography fontWeight={700} color="warning.main">Total Time</Typography>
                               <Typography variant="h6" fontWeight={800}>
                                 {Number(sums.total).toFixed(1)} min
@@ -515,19 +361,19 @@ function EmployeeRow({
                             </Card>
                           </Grid>
                           <Grid item xs={12} md={3}>
-                            <Card sx={{ p: 2, borderRadius: 3, bgcolor: officialBg, border: "1px solid", borderColor: trackBorder }}>
+                            <Card sx={{ p: 2, borderRadius: 3, bgcolor: officialBg, border: "1px solid", borderColor: alpha(theme.palette.divider, 0.4) }}>
                               <Typography fontWeight={700} color="info.main">Official Break Time</Typography>
                               <Typography variant="h6" fontWeight={800}>{sums.official} min</Typography>
                             </Card>
                           </Grid>
                           <Grid item xs={12} md={3}>
-                            <Card sx={{ p: 2, borderRadius: 3, bgcolor: namazBg, border: "1px solid", borderColor: trackBorder }}>
+                            <Card sx={{ p: 2, borderRadius: 3, bgcolor: namazBg, border: "1px solid", borderColor: alpha(theme.palette.divider, 0.4) }}>
                               <Typography fontWeight={700} color="success.main">Namaz Break Time</Typography>
                               <Typography variant="h6" fontWeight={800}>{sums.namaz} min</Typography>
                             </Card>
                           </Grid>
                           <Grid item xs={12} md={3}>
-                            <Card sx={{ p: 2, borderRadius: 3, bgcolor: generalBg, border: "1px solid", borderColor: trackBorder }}>
+                            <Card sx={{ p: 2, borderRadius: 3, bgcolor: generalBg, border: "1px solid", borderColor: alpha(theme.palette.divider, 0.4) }}>
                               <Typography fontWeight={700}>General Break Time</Typography>
                               <Typography variant="h6" fontWeight={800}>
                                 {sums.general} min {generalExceeded ? "(Exceeded by " + (sums.general - generalLimit) + ")" : ""}
@@ -554,14 +400,9 @@ function EmployeeRow({
 export default function Employees() {
   const theme = useTheme();
 
-  const token = getToken();
   const role = getRole();                 // 'employee' | 'admin' | 'superadmin'
   const isEmployee = role === "employee";
   const canDownload = role === "admin" || role === "superadmin";
-  const canEdit = role === "superadmin";
-
-  // attach token to axios for all calls
-  axios.defaults.headers.common["Authorization"] = token ? `Bearer ${token}` : "";
 
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
@@ -571,17 +412,6 @@ export default function Employees() {
     categoryColors: {}
   });
   const [employeeFilter, setEmployeeFilter] = useState("all");
-
-  // Update modal (Employee)
-  const [editOpen, setEditOpen] = useState(false);
-  const [editValues, setEditValues] = useState({ id: "", name: "", department: "", shift_start: "", shift_end: "" });
-
-  // Update modal (Session/Activity)
-  const [editSessOpen, setEditSessOpen] = useState(false);
-  const [editSessValues, setEditSessValues] = useState({
-    id: "", kind: "Idle", reason: "", category: "General",
-    startDate: "", startTime: "", endDate: "", endTime: ""
-  });
 
   // Modes
   const [mode, setMode] = useState("day");
@@ -600,15 +430,17 @@ export default function Employees() {
   /* ----- API fetch ----- */
   const fetchEmployees = async () => {
     try {
-      const res = await axios.get(API + "/employees", { timeout: 20000 });
+      const res = await api.get("/employees", { timeout: 20000 });
       const arr = Array.isArray(res.data) ? res.data : res.data.employees || [];
       setEmployees(arr);
-      const gl = res.data && res.data.settings ? res.data.settings.general_idle_limit : undefined;
-      if (typeof gl === "number") {
-        setConfig((c) => ({ ...c, generalIdleLimit: gl }));
-      }
-      if (res.data?.categoryColors) {
-        setConfig((c) => ({ ...c, categoryColors: res.data.categoryColors }));
+
+      const s = res.data && res.data.settings ? res.data.settings : null;
+      if (s) {
+        setConfig((c) => ({
+          ...c,
+          generalIdleLimit: typeof s.general_idle_limit === "number" ? s.general_idle_limit : c.generalIdleLimit,
+          namazLimit:       typeof s.namaz_limit        === "number" ? s.namaz_limit        : c.namazLimit
+        }));
       }
     } catch (e) {
       console.error("Error fetching employees:", e);
@@ -617,7 +449,7 @@ export default function Employees() {
 
   const fetchConfig = async () => {
     try {
-      const res = await axios.get(API + "/config", { timeout: 15000 });
+      const res = await api.get("/config", { timeout: 15000 });
       setConfig((c) => ({ ...c, ...(res.data || {}) }));
     } catch (e) {
       console.warn("Config fetch failed (using defaults).", e && e.message ? e.message : e);
@@ -640,12 +472,10 @@ export default function Employees() {
     return () => clearInterval(t);
   }, [mode, autoShiftDay]);
 
-  // Month bounds
   useEffect(() => {
     if (mode !== "month") return;
     const parts = month.split("-").map(Number);
-    const yy = parts[0];
-    const mm = parts[1];
+    const yy = parts[0]; const mm = parts[1];
     const start = yy + "-" + pad(mm) + "-01";
     const endDate = new Date(yy, mm, 0).getDate();
     const end = yy + "-" + pad(mm) + "-" + pad(endDate);
@@ -653,7 +483,6 @@ export default function Employees() {
     setTo(end);
   }, [mode, month]);
 
-  // Lock dropdown for employees
   useEffect(() => {
     if (isEmployee) {
       setEmployeeFilter(getSelfEmpId() || "all");
@@ -682,8 +511,7 @@ export default function Employees() {
   function getMonthDays() {
     if (mode !== "month") return 1;
     const parts = month.split("-").map(Number);
-    const yy = parts[0];
-    const mm = parts[1];
+    const yy = parts[0]; const mm = parts[1];
     return new Date(yy, mm, 0).getDate();
   }
   function effectiveGeneralLimit(daysOverride) {
@@ -710,108 +538,6 @@ export default function Employees() {
     }
     return set;
   };
-
-  /* ======== Employee Update/Delete ======== */
-  function onEditOpen(emp) {
-    setEditValues({
-      id: emp._id || emp.id || emp.emp_id,
-      name: emp.name || "",
-      department: emp.department || "",
-      shift_start: emp.shift_start || "",
-      shift_end: emp.shift_end || ""
-    });
-    setEditOpen(true);
-  }
-
-  async function onEditSave() {
-    try {
-      const { id, name, department, shift_start, shift_end } = editValues;
-      await axios.put(`${API}/employees/${encodeURIComponent(id)}`, {
-        name, department, shift_start, shift_end
-      }, { timeout: 15000 });
-      setEditOpen(false);
-      await fetchEmployees();
-    } catch (e) {
-      alert("Update failed: " + (e?.response?.data?.error || e.message));
-    }
-  }
-
-  async function onDeleteEmp(emp) {
-    const id = emp._id || emp.id || emp.emp_id;
-    if (!id) return;
-    if (!window.confirm(`Delete employee "${emp.name}"? This cannot be undone.`)) return;
-    try {
-      await axios.delete(`${API}/employees/${encodeURIComponent(id)}`, { timeout: 15000 });
-      await fetchEmployees();
-    } catch (e) {
-      alert("Delete failed: " + (e?.response?.data?.error || e.message));
-    }
-  }
-
-  /* ======== Activity Log Edit/Close/Delete ======== */
-  function onEditSessionOpen(_emp, session) {
-    const startISO = session.idle_start || null;
-    const endISO = session.idle_end || null;
-    setEditSessValues({
-      id: session._id || session.id,
-      kind: session.kind || (session.category === "AutoBreak" ? "AutoBreak" : "Idle"),
-      reason: session.reason || "",
-      category: session.category || "General",
-      startDate: startISO ? toInputDate(startISO) : (session.shiftDate || ""),
-      startTime: startISO ? toInputTime(startISO) : (session.start_time_local || "").slice(0,8),
-      endDate: endISO ? toInputDate(endISO) : "",
-      endTime: endISO ? toInputTime(endISO) : "",
-    });
-    setEditSessOpen(true);
-  }
-
-  async function onEditSessionSave() {
-    try {
-      const { id, kind, reason, category, startDate, startTime, endDate, endTime } = editSessValues;
-      if (kind === "AutoBreak") {
-        alert("AutoBreak rows are system-generated; manual edits are disabled.");
-        setEditSessOpen(false);
-        return;
-      }
-      const idle_start = localDateTimeToISO(startDate, startTime);
-      const idle_end = (endDate && endTime) ? localDateTimeToISO(endDate, endTime) : null;
-
-      if (!idle_start) {
-        alert("Start date/time is invalid.");
-        return;
-      }
-
-      await axios.put(`${API}/activities/${encodeURIComponent(id)}`, {
-        reason, category, idle_start, idle_end
-      }, { timeout: 15000 });
-
-      setEditSessOpen(false);
-      await fetchEmployees();
-    } catch (e) {
-      alert("Activity update failed: " + (e?.response?.data?.error || e.message));
-    }
-  }
-
-  async function onCloseSessionNow(session) {
-    try {
-      const id = session._id || session.id;
-      await axios.put(`${API}/activities/${encodeURIComponent(id)}/end`, {}, { timeout: 15000 });
-      await fetchEmployees();
-    } catch (e) {
-      alert("Close failed: " + (e?.response?.data?.error || e.message));
-    }
-  }
-
-  async function onDeleteSession(session) {
-    try {
-      const id = session._id || session.id;
-      if (!window.confirm("Delete this activity log? This cannot be undone.")) return;
-      await axios.delete(`${API}/activities/${encodeURIComponent(id)}`, { timeout: 15000 });
-      await fetchEmployees();
-    } catch (e) {
-      alert("Delete failed: " + (e?.response?.data?.error || e.message));
-    }
-  }
 
   /* ---------- Downloads (admin/superadmin only) ---------- */
   function summarizeReasonsByCategory(sessions) {
@@ -865,11 +591,50 @@ export default function Employees() {
     return rows;
   }
 
+  function downloadXls(filename, headers, rows) {
+    const headerHtml = headers
+      .map(
+        (h) =>
+          '<th style="background:#1f2937;color:#fff;padding:10px 8px;border:1px solid #e5e7eb;text-align:center;font-weight:700">' +
+          h +
+          "</th>"
+      )
+      .join("");
+
+    const rowHtml = rows
+      .map((r) => {
+        const cells = r
+          .map((c, i) => {
+            const base = "padding:8px;border:1px solid #e5e7eb;text-align:center;vertical-align:middle";
+            const wrap = /reason/i.test(headers[i]) ? "white-space:normal;max-width:520px" : "white-space:nowrap";
+            return '<td style="' + base + ";" + wrap + '">' + String(c == null ? "" : c) + "</td>";
+          })
+          .join("");
+        return "<tr>" + cells + "</tr>";
+      })
+      .join("");
+
+    const html =
+      "<html><head><meta charset=\"utf-8\" />" +
+      "<style>table{border-collapse:collapse;font-family:Segoe UI,Arial;font-size:12px} thead tr th{position:sticky;top:0} td,th{word-break:break-word}</style>" +
+      "</head><body><table><thead><tr>" +
+      headerHtml +
+      "</tr></thead><tbody>" +
+      rowHtml +
+      "</tbody></table></body></html>";
+
+    const blob = new Blob([html], { type: "application/vnd.ms-excel" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename.slice(-4) === ".xls" ? filename : filename + ".xls";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
   function downloadPDFDailySummaryAll() {
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
-
     const pageW = doc.internal.pageSize.getWidth();
-    const gray600 = "#4b5563";
     const brand = [31, 41, 55];
     const accent = [99, 102, 241];
 
@@ -888,24 +653,16 @@ export default function Employees() {
     const header = () => {
       doc.setFillColor(brand[0], brand[1], brand[2]);
       doc.rect(0, 0, pageW, 64, "F");
-
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(20);
-      doc.setTextColor("#ffffff");
+      doc.setFont("helvetica", "bold"); doc.setFontSize(20); doc.setTextColor("#ffffff");
       doc.text("Employee Idle Report", 40, 26);
-
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(12);
+      doc.setFont("helvetica", "normal"); doc.setFontSize(12);
       doc.text(title, 40, 46);
-
       doc.setFontSize(10);
       doc.text("Range: " + label + "   |   TZ: " + ZONE + "   |   " + limitsText, pageW - 40, 26, { align: "right" });
     };
 
     const body = collectReportRowsWithReasons();
-    const headers = [
-      "Emp ID", "Name", "Dept", "Total (m)", "General (m)", "Namaz (m)", "Official (m)", "Auto (m)", "Reasons (by\nCategory)"
-    ];
+    const headers = ["Emp ID", "Name", "Dept", "Total (m)", "General (m)", "Namaz (m)", "Official (m)", "Auto (m)", "Reasons (by\nCategory)"];
 
     autoTable(doc, {
       head: [headers],
@@ -941,10 +698,24 @@ export default function Employees() {
       const sessions = sessionsForEmp(emp);
       const sums = calcTotals(sessions);
 
-      const days = uniqueDays(sessions).size || getMonthDays();
-      const shiftSpan = shiftSpanMinutes(emp.shift_start, emp.shift_end);
-
-      const workMin = Math.max(0, shiftSpan * days - sums.total);
+      const days = uniqueDays(sessions).size || (mode === "month" ? new Date(month.split("-")[0], month.split("-")[1], 0).getDate() : 1);
+      const shiftSpanMinutes = (start, end) => {
+        const toMin = (s) => {
+          if (!s) return null;
+          const m = String(s).trim().toUpperCase().split(/\s+/);
+          if (m.length === 2 && (m[1] === "AM" || m[1] === "PM")) {
+            let [h, mi] = m[0].split(":").map(Number); mi = mi || 0;
+            if (m[1] === "PM" && h < 12) h += 12;
+            if (m[1] === "AM" && h === 12) h = 0;
+            return h * 60 + mi;
+          }
+          const p = s.split(":").map(Number); return p[0] * 60 + (p[1] || 0);
+        };
+        const s = toMin(start); const e = toMin(end);
+        if (s == null || e == null) return 9 * 60;
+        return e >= s ? e - s : 24 * 60 - s + e;
+      };
+      const workMin = Math.max(0, shiftSpanMinutes(emp.shift_start, emp.shift_end) * days - sums.total);
 
       const gCap = effectiveGeneralLimit(days);
       const nCap = effectiveNamazLimit(days);
@@ -1034,104 +805,9 @@ export default function Employees() {
       : (isSingleSelected ? "Range — " + selectedName : "Range — All Employees");
 
   function handleQuickDownload() {
-    if (mode === "day") {
-      return isSingleSelected ? downloadPDFDailyDetailSelected() : downloadPDFDailySummaryAll();
-    }
-    if (mode === "month") {
-      return isSingleSelected ? downloadPDFMonthlyTotals("one") : downloadPDFMonthlyTotals("all");
-    }
+    if (mode === "day") return downloadPDFDailySummaryAll();
+    if (mode === "month") return isSingleSelected ? downloadPDFMonthlyTotals("one") : downloadPDFMonthlyTotals("all");
     return downloadPDFDailySummaryAll();
-  }
-
-  function downloadPDFDailyDetailSelected() {
-    if (employeeFilter === "all" || !filtered.length || mode !== "day") return;
-
-    const emp = filtered[0];
-    const empName = cleanName(emp.name);
-    const sessions = sessionsForEmp(emp).sort(
-      (a, b) => new Date(a.idle_start || 0) - new Date(b.idle_start || 0)
-    );
-    const sums = calcTotals(sessions);
-
-    const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
-    const pageW = doc.internal.pageSize.getWidth();
-
-    const brand = [59, 130, 246];
-    doc.setFillColor(31, 41, 55);
-    doc.rect(0, 0, pageW, 64, "F");
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(20);
-    doc.setTextColor("#fff");
-    doc.text("Daily Report — " + empName, 40, 26);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(11);
-    doc.text(
-      "Dept: " +
-        (emp.department || "-") +
-        "   Shift: " +
-        emp.shift_start +
-        " – " +
-        emp.shift_end +
-        "   Day: " +
-        day +
-        "   TZ: " +
-        ZONE,
-      40,
-      46
-    );
-
-    doc.setFillColor(brand[0], brand[1], brand[2]);
-    doc.roundedRect(40, 84, 340, 26, 6, 6, "F");
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(12);
-    doc.setTextColor("#fff");
-    doc.text(day + " — " + emp.shift_start + " – " + emp.shift_end, 50, 101);
-
-    const body = sessions.map((s) => [
-      s.category || "-",
-      s.start_time_local || "-",
-      s.end_time_local || "Ongoing",
-      s.reason || "-",
-      s.category === "AutoBreak" ? Number(s.duration || 0).toFixed(1) : s.duration || 0
-    ]);
-
-    autoTable(doc, {
-      head: [["Category", "Start Time", "End Time", "Reason", "Duration (min)"]],
-      body: body,
-      startY: 120,
-      margin: { left: 40, right: 40 },
-      styles: { fontSize: 10, cellPadding: 6, halign: "center", valign: "middle" },
-      columnStyles: { 0: { cellWidth: 90 }, 3: { halign: "left", cellWidth: 420, overflow: "linebreak" } },
-      headStyles: { fillColor: brand, textColor: 255, halign: "center" },
-      theme: "striped",
-      alternateRowStyles: { fillColor: [248, 250, 252] }
-    });
-
-    const y = (doc.lastAutoTable?.finalY || 120) + 18;
-    const boxW = 190;
-    const boxH = 68;
-    const gap = 16;
-    const blocks = [
-      ["Total Time", Number(sums.total).toFixed(1) + " min", [234, 179, 8]],
-      ["Official Break Time", sums.official + " min", [59, 130, 246]],
-      ["Namaz Break Time", sums.namaz + " min", [16, 185, 129]],
-      ["General Break Time", sums.general + " min", sums.general > effectiveGeneralLimit() ? [239, 68, 68] : [107, 114, 128]]
-    ];
-    blocks.forEach((b, i) => {
-      const x = 40 + i * (boxW + gap);
-      doc.setDrawColor(229, 231, 235);
-      doc.setFillColor(247, 249, 251);
-      doc.roundedRect(x, y, boxW, boxH, 8, 8, "FD");
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(11);
-      doc.setTextColor(b[2][0], b[2][1], b[2][2]);
-      doc.text(b[0], x + 12, y + 22);
-      doc.setFontSize(16);
-      doc.setTextColor(17, 24, 39);
-      doc.text(b[1], x + 12, y + 46);
-    });
-
-    doc.save("daily_" + slugName(empName) + "_" + day + ".pdf");
   }
 
   const gDaily = config.generalIdleLimit == null ? 60 : config.generalIdleLimit;
@@ -1204,60 +880,20 @@ export default function Employees() {
 
         {canDownload && (
           <>
-            <Button
-              variant="contained"
-              startIcon={<Download />}
-              onClick={(e) => setAnchorEl(e.currentTarget)}
-            >
+            <Button variant="contained" startIcon={<Download />} onClick={(e) => setAnchorEl(e.currentTarget)}>
               {isSingleSelected ? "Download: " + selectedName : "Download Report"}
             </Button>
             <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
-              <MenuItem onClick={() => {
-                setAnchorEl(null);
-                if (confirmDownload(quickLabel)) handleQuickDownload();
-              }}>
+              <MenuItem onClick={() => { setAnchorEl(null); if (confirmDownload(quickLabel)) handleQuickDownload(); }}>
                 {"Quick — " + quickLabel}
               </MenuItem>
-
-              <MenuItem onClick={() => {
-                setAnchorEl(null);
-                if (confirmDownload("Daily — All Employees")) downloadPDFDailySummaryAll();
-              }}>
+              <MenuItem onClick={() => { setAnchorEl(null); if (confirmDownload("Daily — All Employees")) downloadPDFDailySummaryAll(); }}>
                 Daily — All Employees
               </MenuItem>
-              <MenuItem
-                disabled={!(mode === "day" && isSingleSelected)}
-                onClick={() => {
-                  setAnchorEl(null);
-                  if (confirmDownload("Daily — " + (selectedName || "Selected Employee"))) downloadPDFDailyDetailSelected();
-                }}
-              >
-                {"Daily — " + (selectedName || "Selected Employee")}
-              </MenuItem>
-
-              <MenuItem
-                disabled={mode !== "month"}
-                onClick={() => {
-                  setAnchorEl(null);
-                  if (confirmDownload("Monthly — All Employees")) downloadPDFMonthlyTotals("all");
-                }}
-              >
+              <MenuItem disabled={mode !== "month"} onClick={() => { setAnchorEl(null); if (confirmDownload("Monthly — All Employees")) downloadPDFMonthlyTotals("all"); }}>
                 Monthly — All Employees
               </MenuItem>
-              <MenuItem
-                disabled={!(mode === "month" && isSingleSelected)}
-                onClick={() => {
-                  setAnchorEl(null);
-                  if (confirmDownload("Monthly — " + (selectedName || "Selected Employee"))) downloadPDFMonthlyTotals("one");
-                }}
-              >
-                {"Monthly — " + (selectedName || "Selected Employee")}
-              </MenuItem>
-
-              <MenuItem onClick={() => {
-                setAnchorEl(null);
-                if (confirmDownload("Excel — Summary")) downloadXLS();
-              }}>
+              <MenuItem onClick={() => { setAnchorEl(null); if (confirmDownload("Excel — Summary")) downloadXLS(); }}>
                 Excel — Summary (with Reasons)
               </MenuItem>
             </Menu>
@@ -1267,7 +903,7 @@ export default function Employees() {
 
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
         {mode === "day" ? "Range: " + day : "Range: " + from + " → " + to}
-        &nbsp; | &nbsp; {employeeFilter !== "all" ? "Employee: " + selectedName : "All Employees"}
+        &nbsp; | &nbsp; {employeeFilter !== "all" ? "Employee: " + (filtered[0]?.name || "") : "All Employees"}
         &nbsp; | &nbsp; General: {gDaily}m/day • Namaz: {nDaily}m/day
         &nbsp; | &nbsp; TZ: {ZONE}
       </Typography>
@@ -1280,7 +916,7 @@ export default function Employees() {
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Department</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Shift</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Status</TableCell>
-              <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="center">Sessions / Actions</TableCell>
+              <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="center">Sessions</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -1295,125 +931,11 @@ export default function Employees() {
                 generalLimit={effectiveGeneralLimit()}
                 categoryColors={config.categoryColors}
                 defaultOpen={filtered.length === 1}
-                canEdit={canEdit}
-                onEdit={onEditOpen}
-                onDelete={onDeleteEmp}
-                onEditSession={onEditSessionOpen}
-                onCloseSession={onCloseSessionNow}
-                onDeleteSession={onDeleteSession}
               />
             ))}
           </TableBody>
         </Table>
       </TableContainer>
-
-      {/* Update Employee Dialog */}
-      <Dialog open={editOpen} onClose={() => setEditOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>Update Employee</DialogTitle>
-        <DialogContent dividers>
-          <Box mt={1} display="grid" gridTemplateColumns="1fr 1fr" gap={2}>
-            <TextField
-              label="Name"
-              value={editValues.name}
-              onChange={(e) => setEditValues((v) => ({ ...v, name: e.target.value }))}
-              fullWidth
-            />
-            <TextField
-              label="Department"
-              value={editValues.department}
-              onChange={(e) => setEditValues((v) => ({ ...v, department: e.target.value }))}
-              fullWidth
-            />
-            <TextField
-              label="Shift Start (e.g. 6:00 PM or 18:00)"
-              value={editValues.shift_start}
-              onChange={(e) => setEditValues((v) => ({ ...v, shift_start: e.target.value }))}
-              fullWidth
-            />
-            <TextField
-              label="Shift End (e.g. 3:00 AM or 03:00)"
-              value={editValues.shift_end}
-              onChange={(e) => setEditValues((v) => ({ ...v, shift_end: e.target.value }))}
-              fullWidth
-            />
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setEditOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={onEditSave}>Save</Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Edit Activity Dialog */}
-      <Dialog open={editSessOpen} onClose={() => setEditSessOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>Update Activity Log</DialogTitle>
-        <DialogContent dividers>
-          <Box mt={1} display="grid" gridTemplateColumns="1fr 1fr" gap={2}>
-            <FormControl fullWidth>
-              <InputLabel id="cat-label">Category</InputLabel>
-              <Select
-                labelId="cat-label"
-                label="Category"
-                value={editSessValues.category}
-                onChange={(e) => setEditSessValues((v) => ({ ...v, category: e.target.value }))}
-              >
-                <MenuItem value="General">General</MenuItem>
-                <MenuItem value="Official">Official</MenuItem>
-                <MenuItem value="Namaz">Namaz</MenuItem>
-              </Select>
-            </FormControl>
-            <TextField
-              label="Reason"
-              value={editSessValues.reason}
-              onChange={(e) => setEditSessValues((v) => ({ ...v, reason: e.target.value }))}
-              fullWidth
-            />
-
-            <TextField
-              label="Start Date"
-              type="date"
-              value={editSessValues.startDate}
-              onChange={(e) => setEditSessValues((v) => ({ ...v, startDate: e.target.value }))}
-              InputLabelProps={{ shrink: true }}
-              fullWidth
-            />
-            <TextField
-              label="Start Time (HH:mm or HH:mm:ss)"
-              type="time"
-              value={editSessValues.startTime}
-              onChange={(e) => setEditSessValues((v) => ({ ...v, startTime: e.target.value }))}
-              inputProps={{ step: 1 }}
-              InputLabelProps={{ shrink: true }}
-              fullWidth
-            />
-
-            <TextField
-              label="End Date (optional)"
-              type="date"
-              value={editSessValues.endDate}
-              onChange={(e) => setEditSessValues((v) => ({ ...v, endDate: e.target.value }))}
-              InputLabelProps={{ shrink: true }}
-              fullWidth
-            />
-            <TextField
-              label="End Time (optional)"
-              type="time"
-              value={editSessValues.endTime}
-              onChange={(e) => setEditSessValues((v) => ({ ...v, endTime: e.target.value }))}
-              inputProps={{ step: 1 }}
-              InputLabelProps={{ shrink: true }}
-              fullWidth
-            />
-          </Box>
-          <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
-            Times are interpreted from your local browser time. Leave end fields blank for ongoing.
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setEditSessOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={onEditSessionSave}>Save</Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 }
