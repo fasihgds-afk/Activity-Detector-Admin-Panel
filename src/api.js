@@ -6,7 +6,7 @@ const BASE = process.env.REACT_APP_API_URL || "http://localhost:8080";
 
 const api = axios.create({
   baseURL: BASE,
-  timeout: 20000,
+  timeout: 60000,
   withCredentials: false, // using Authorization header, not cookies
 });
 
