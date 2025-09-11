@@ -2,11 +2,11 @@
 import axios from "axios";
 import { getToken } from "./auth";
 
-export const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:8080"; // <- your server
+export const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:8080";
 
 const api = axios.create({
   baseURL: API_BASE,
-  timeout: 60000, // ⬅️ was 20000
+  timeout: 60000, // 60s; backend also allows 120s
 });
 
 api.interceptors.request.use((config) => {
@@ -16,4 +16,5 @@ api.interceptors.request.use((config) => {
 });
 
 export default api;
+
 
