@@ -1,4 +1,4 @@
-// Shared axios client that always adds the Bearer token
+// src/api.js
 import axios from "axios";
 import { getToken } from "./auth";
 
@@ -11,7 +11,7 @@ const api = axios.create({
 
 // attach Authorization on every request
 api.interceptors.request.use((config) => {
-  const t = getToken?.();
+  const t = getToken(); // 👈 Fixed: was getToken?.() → just getToken()
   if (t) config.headers.Authorization = `Bearer ${t}`;
   return config;
 });
