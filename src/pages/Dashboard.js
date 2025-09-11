@@ -11,7 +11,7 @@ import {
 } from "recharts";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import api from "../api";
+import api from "../api"; // 👈 USE api INSTEAD OF axios
 
 const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
 
@@ -110,7 +110,7 @@ export default function Dashboard() {
   async function fetchAll() {
     try {
       setLoading(true);
-      const res = await api.get("/employees", { timeout: 15000 });
+      const res = await api.get("/employees", { timeout: 15000 }); // 👈 USE api
       const payload = Array.isArray(res.data) ? { employees: res.data } : res.data || {};
       const data = Array.isArray(payload.employees) ? payload.employees : [];
       setEmployees(data);
