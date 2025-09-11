@@ -4,18 +4,17 @@ import {
   DialogTitle, DialogContent, List, ListItem, ListItemText, Select, MenuItem,
   Chip, LinearProgress, Tooltip, Alert, Skeleton, ToggleButton, ToggleButtonGroup
 } from "@mui/material";
-import { useTheme, alpha, lighten, darken } from "@mui/material/styles";
+import { useTheme, alpha } from "@mui/material/styles";
 import {
   PieChart, Pie, Cell, Tooltip as RTooltip, Legend,
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis
 } from "recharts";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import axios from "axios";
-
-const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
+import api from "../api";
 
 const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
+
 function ymdInAsiaFromISO(iso) {
   if (!iso) return null;
   try {
@@ -26,6 +25,7 @@ function ymdInAsiaFromISO(iso) {
     return fmt.format(d);
   } catch { return null; }
 }
+
 function currentShiftYmd() {
   const fmtYmd = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Karachi", year: "numeric", month: "2-digit", day: "2-digit" });
   const hourFmt = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Karachi", hour: "2-digit", hourCycle: "h23" });
@@ -38,6 +38,7 @@ function currentShiftYmd() {
   dt.setUTCDate(dt.getUTCDate() - 1);
   return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
 }
+
 function firstLastOfMonth(ymd) {
   const [y, m] = ymd.split("-").map(Number);
   const start = `${y}-${pad(m)}-01`;
@@ -67,7 +68,7 @@ function downloadXls(filename, headers, rows) {
   document.body.removeChild(a);
 }
 
-/* ---- theme-driven palette so dark mode looks perfect ---- */
+/* ---- theme-driven palette ---- */
 function useColors(theme) {
   const primary = theme.palette.primary.main;
   const secondary = theme.palette.secondary?.main || theme.palette.success.main;
@@ -109,35 +110,49 @@ export default function Dashboard() {
   async function fetchAll() {
     try {
       setLoading(true);
-      const res = await axios.get(`${API}/employees`, { timeout: 15000 });
-      const data = Array.isArray(res.data) ? res.data : res.data.employees || [];
+      const res = await api.get("/employees", { timeout: 15000 });
+      const payload = Array.isArray(res.data) ? { employees: res.data } : res.data || {};
+      const data = Array.isArray(payload.employees) ? payload.employees : [];
       setEmployees(data);
-      const cfg = res.data?.settings || {};
-      const general = Number(cfg.general_idle_limit) || limits.general;
-      const namaz = Number(cfg.namazLimit) || limits.namaz;
+
+      // settings in /employees use snake_case keys
+      const cfg = payload.settings || {};
+      const general = Number(cfg.general_idle_limit ?? limits.general ?? 60);
+      const namaz   = Number(cfg.namaz_limit        ?? limits.namaz   ?? 50);
       setLimits({ general, namaz });
+
       setErr("");
       setUpdatedAt(new Date().toLocaleString("en-PK", { hour12: true }));
-    } catch {
-      setErr("Could not load data. Retrying automatically…");
+    } catch (e) {
+      setErr(
+        e?.response?.status === 401
+          ? "Session expired or not logged in. Please sign in again."
+          : "Could not load data. Retrying automatically…"
+      );
     } finally { setLoading(false); }
   }
+
   useEffect(() => {
     fetchAll();
     pollRef.current = setInterval(fetchAll, 60000);
     return () => clearInterval(pollRef.current);
   }, []);
 
+  function ymdOf(s) {
+    return s.shiftDate || ymdInAsiaFromISO(s.idle_start);
+  }
+
   function sessionsInScope(sessions) {
     const list = Array.isArray(sessions) ? sessions : [];
     if (scope === "today") {
-      return list.filter((s) => (s.shiftDate || ymdInAsiaFromISO(s.idle_start)) === todayYmd);
+      return list.filter((s) => ymdOf(s) === todayYmd);
     }
     return list.filter((s) => {
-      const sd = s.shiftDate || ymdInAsiaFromISO(s.idle_start);
+      const sd = ymdOf(s);
       return sd && sd >= monthStart && sd <= monthEnd;
     });
   }
+
   const effectiveGeneralLimit = useMemo(
     () => (scope === "month" ? limits.general * daysInMonth : limits.general),
     [scope, limits.general, daysInMonth]
@@ -150,9 +165,7 @@ export default function Dashboard() {
   const totalsToday = useMemo(() => {
     let general = 0, namaz = 0, official = 0;
     for (const e of employees) {
-      const ses = (e.idle_sessions || []).filter(
-        (s) => (s.shiftDate || ymdInAsiaFromISO(s.idle_start)) === todayYmd
-      );
+      const ses = (e.idle_sessions || []).filter((s) => ymdOf(s) === todayYmd);
       for (const s of ses) {
         const d = Number(s.duration) || 0;
         if (s.category === "General") general += d;
@@ -182,7 +195,7 @@ export default function Dashboard() {
 
       let status = "Obedient", color = "success";
       if (genEx > 0 || namEx > 0) { status = "Exceeded"; color = "error"; }
-      else if ((general / genCap) >= 0.8 || (namaz / namCap) >= 0.8) { status = "Near Limit"; color = "warning"; }
+      else if ((genCap && general / genCap >= 0.8) || (namCap && namaz / namCap >= 0.8)) { status = "Near Limit"; color = "warning"; }
 
       const score = genEx * 3 + namEx * 3 + total * 0.01;
       rows.push({
@@ -208,22 +221,6 @@ export default function Dashboard() {
     { name: "Namaz Break", value: totalsToday.namaz },
     { name: "Official Break", value: totalsToday.official },
   ]), [totalsToday]);
-
-  const barDataToday = useMemo(() => {
-    return employees.map((emp) => {
-      const ses = (emp.idle_sessions || []).filter(
-        (s) => (s.shiftDate || ymdInAsiaFromISO(s.idle_start)) === todayYmd
-      );
-      let g = 0, n = 0, o = 0;
-      for (const s of ses) {
-        const d = Number(s.duration) || 0;
-        if (s.category === "General") g += d;
-        else if (s.category === "Namaz") n += d;
-        else if (s.category === "Official") o += d;
-      }
-      return { name: emp.name, General: g, Namaz: n, Official: o };
-    });
-  }, [employees, todayYmd]);
 
   function exportPDF() {
     const label = scope === "today" ? todayYmd : `${monthStart} → ${monthEnd} (${daysInMonth} days)`;
@@ -273,6 +270,7 @@ export default function Dashboard() {
     const fileLabel = scope === "today" ? todayYmd : `${monthStart.replaceAll("-","")}_${monthEnd.replaceAll("-","")}`;
     doc.save(`leaderboard_${fileLabel}.pdf`);
   }
+
   function exportXLS() {
     const headers = ["Rank","Name","Department","Status","General (m)","Namaz (m)","Official (m)","Total (m)"];
     const rows = leaderboard.map((r) => [r.rank, r.name, r.department, r.status, r.general, r.namaz, r.official, r.total]);
@@ -376,14 +374,10 @@ export default function Dashboard() {
             <Pie
               data={
                 selectedEmp === "all"
-                  ? [
-                      { name: "General Break", value: totalsToday.general },
-                      { name: "Namaz Break", value: totalsToday.namaz },
-                      { name: "Official Break", value: totalsToday.official },
-                    ]
+                  ? donutData
                   : (() => {
                       const emp = employees.find(e => (e.id || e.emp_id || e._id) === selectedEmp);
-                      const ses = (emp?.idle_sessions || []).filter((s) => (s.shiftDate || ymdInAsiaFromISO(s.idle_start)) === todayYmd);
+                      const ses = (emp?.idle_sessions || []).filter((s) => ymdOf(s) === todayYmd);
                       const agg = (c) => ses.reduce((a, s) => a + (s.category === c ? (s.duration || 0) : 0), 0);
                       return [
                         { name: "General Break", value: agg("General") },
@@ -408,7 +402,7 @@ export default function Dashboard() {
         <Divider sx={{ my: 2 }} />
         <ResponsiveContainer width="100%" height={400}>
           <BarChart data={employees.map((emp) => {
-            const ses = (emp.idle_sessions || []).filter((s) => (s.shiftDate || ymdInAsiaFromISO(s.idle_start)) === todayYmd);
+            const ses = (emp.idle_sessions || []).filter((s) => ymdOf(s) === todayYmd);
             let g = 0, n = 0, o = 0;
             for (const s of ses) {
               const d = Number(s.duration) || 0;
@@ -429,7 +423,7 @@ export default function Dashboard() {
         </ResponsiveContainer>
       </Card>
 
-      {/* Leaderboard (theme-aware) */}
+      {/* Leaderboard */}
       <Card sx={{ p: 3, mb: 4 }}>
         <Typography variant="h6" fontWeight={700}>
           Leaderboard — Obedience ({scope === "today" ? "Today" : `This Month (${daysInMonth} days)`})
@@ -489,16 +483,11 @@ export default function Dashboard() {
                     <td style={{ padding: 10 }}>{r.name}</td>
                     <td style={{ padding: 10 }}>{r.department}</td>
                     <td style={{ padding: 10, textAlign: "center" }}>{pctBar(r.general, capG, C.general)}</td>
-                    <td style={{ padding: 10, textAlign: "center" }}>{pctBar(r.namaz, capN, C.namaz)}</td>
+                    <td style={{ padding: 10, textAlign: "center" }}>{pctBar(r.namaz,  capN, C.namaz)}</td>
                     <td style={{ padding: 10, fontWeight: 600, textAlign: "center" }}>{r.official} m</td>
                     <td style={{ padding: 10, fontWeight: 700, textAlign: "center" }}>{r.total} m</td>
                     <td style={{ padding: 10, textAlign: "center" }}>
-                      <Chip
-                        label={r.status}
-                        color={r.color}
-                        variant={r.status === "Obedient" ? "filled" : "outlined"}
-                        sx={{ fontWeight: 700 }}
-                      />
+                      <Chip label={r.status} color={r.color} variant={r.status === "Obedient" ? "filled" : "outlined"} sx={{ fontWeight: 700 }} />
                     </td>
                   </tr>
                 );
@@ -527,3 +516,4 @@ export default function Dashboard() {
     </Box>
   );
 }
+
