@@ -8,7 +8,7 @@ import {
 } from "@mui/material";
 import { useTheme, alpha } from "@mui/material/styles";
 import { KeyboardArrowDown, KeyboardArrowUp, AccessTime, Download } from "@mui/icons-material";
-import api from "../api"; // 👈 CHANGED: Use api instead of axios
+import api from "../api"; // 👈 USE api INSTEAD OF axios
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { getToken, getRole, getSelfEmpId } from "../auth";
@@ -577,7 +577,7 @@ export default function Employees() {
   /* ----- API fetch ----- */
   const fetchEmployees = async () => {
     try {
-      const res = await api.get("/employees"); // 👈 CHANGED: Use api, not axios
+      const res = await api.get("/employees"); // 👈 USE api — NO TIMEOUT NEEDED
       const arr = Array.isArray(res.data) ? res.data : res.data.employees || [];
       setEmployees(arr);
       const gl = res.data && res.data.settings ? res.data.settings.general_idle_limit : undefined;
@@ -589,12 +589,18 @@ export default function Employees() {
       }
     } catch (e) {
       console.error("Error fetching employees:", e);
+      if (e.response?.status === 401) {
+        alert("Session expired. Please log in again.");
+        // Optionally clear auth and redirect
+        // clearAuth();
+        // navigate('/login');
+      }
     }
   };
 
   const fetchConfig = async () => {
     try {
-      const res = await api.get("/config"); // 👈 CHANGED: Use api
+      const res = await api.get("/config"); // 👈 USE api
       setConfig((c) => ({ ...c, ...(res.data || {}) }));
     } catch (e) {
       console.warn("Config fetch failed (using defaults).", e && e.message ? e.message : e);
@@ -705,7 +711,7 @@ export default function Employees() {
   async function onEditSave() {
     try {
       const { id, name, department, shift_start, shift_end } = editValues;
-      await api.put(`/employees/${encodeURIComponent(id)}`, { // 👈 CHANGED
+      await api.put(`/employees/${encodeURIComponent(id)}`, { // 👈 USE api
         name, department, shift_start, shift_end
       });
       setEditOpen(false);
@@ -720,7 +726,7 @@ export default function Employees() {
     if (!id) return;
     if (!window.confirm(`Delete employee "${emp.name}"? This cannot be undone.`)) return;
     try {
-      await api.delete(`/employees/${encodeURIComponent(id)}`); // 👈 CHANGED
+      await api.delete(`/employees/${encodeURIComponent(id)}`); // 👈 USE api
       await fetchEmployees();
     } catch (e) {
       alert("Delete failed: " + (e?.response?.data?.error || e.message));
@@ -758,7 +764,7 @@ export default function Employees() {
         alert("Start date/time is invalid.");
         return;
       }
-      await api.put(`/activities/${encodeURIComponent(id)}`, { // 👈 CHANGED
+      await api.put(`/activities/${encodeURIComponent(id)}`, { // 👈 USE api
         reason, category, idle_start, idle_end
       });
       setEditSessOpen(false);
@@ -771,7 +777,7 @@ export default function Employees() {
   async function onCloseSessionNow(session) {
     try {
       const id = session._id || session.id;
-      await api.put(`/activities/${encodeURIComponent(id)}/end`, {}); // 👈 CHANGED
+      await api.put(`/activities/${encodeURIComponent(id)}/end`, {}); // 👈 USE api
       await fetchEmployees();
     } catch (e) {
       alert("Close failed: " + (e?.response?.data?.error || e.message));
@@ -782,7 +788,7 @@ export default function Employees() {
     try {
       const id = session._id || session.id;
       if (!window.confirm("Delete this activity log? This cannot be undone.")) return;
-      await api.delete(`/activities/${encodeURIComponent(id)}`); // 👈 CHANGED
+      await api.delete(`/activities/${encodeURIComponent(id)}`); // 👈 USE api
       await fetchEmployees();
     } catch (e) {
       alert("Delete failed: " + (e?.response?.data?.error || e.message));
