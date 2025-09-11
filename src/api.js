@@ -1,12 +1,13 @@
 // src/api.js
 import axios from "axios";
-import { getToken } from "./auth";
+import { getToken, clearAuth } from "./auth";
 
-export const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:8080";
+const BASE = process.env.REACT_APP_API_URL || "http://localhost:8080";
 
 const api = axios.create({
-  baseURL: API_BASE,
-  timeout: 60000, // 60s; backend also allows 120s
+  baseURL: BASE,
+  timeout: 20000,
+  withCredentials: false, // using Authorization header, not cookies
 });
 
 api.interceptors.request.use((config) => {
@@ -15,6 +16,18 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (err?.response?.status === 401) {
+      clearAuth();
+    }
+    return Promise.reject(err);
+  }
+);
+
 export default api;
+export { BASE as API_BASE };
+
 
 
