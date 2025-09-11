@@ -8,16 +8,14 @@ import {
 } from "@mui/material";
 import { useTheme, alpha } from "@mui/material/styles";
 import { KeyboardArrowDown, KeyboardArrowUp, AccessTime, Download } from "@mui/icons-material";
-import axios from "axios";
+import api from "../api"; // 👈 USE api INSTEAD OF axios
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-
 import { getToken, getRole, getSelfEmpId } from "../auth";
 
 /* =========================
    API base
    ========================= */
-const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
 const ZONE = "Asia/Karachi";
 
 /* =========================
@@ -61,12 +59,10 @@ function currentShiftYmd() {
     hour: "2-digit",
     hourCycle: "h23"
   });
-
   const now = new Date();
   const ymd = fmtYmd.format(now);
   const hour = parseInt(hourFmt.format(now), 10);
   if (hour >= 6) return ymd;
-
   const parts = ymd.split("-").map(Number);
   const y = parts[0];
   const m = parts[1];
@@ -87,7 +83,6 @@ function inPickedRange(shiftDate, mode, day, from, to, idleStartISO) {
   let sd = shiftDate;
   if (!sd) sd = ymdInAsiaFromISO(idleStartISO);
   if (!sd) return false;
-
   if (mode === "day") return sd === day;
   if (mode === "month") return sd >= from && sd <= to;
   if (!from || !to) return true;
@@ -128,6 +123,7 @@ function parseShiftToMinutes(str) {
   if (Number.isFinite(h2) && Number.isFinite(m2)) return h2 * 60 + m2;
   return null;
 }
+
 function shiftSpanMinutes(shiftStart, shiftEnd) {
   const s = parseShiftToMinutes(shiftStart);
   const e = parseShiftToMinutes(shiftEnd);
@@ -147,7 +143,6 @@ function downloadXls(filename, headers, rows) {
         "</th>"
     )
     .join("");
-
   const rowHtml = rows
     .map((r) => {
       const cells = r
@@ -163,7 +158,6 @@ function downloadXls(filename, headers, rows) {
       return "<tr>" + cells + "</tr>";
     })
     .join("");
-
   const html =
     "<html><head><meta charset=\"utf-8\" />" +
     "<style>table{border-collapse:collapse;font-family:Segoe UI,Arial;font-size:12px} thead tr th{position:sticky;top:0} td,th{word-break:break-word}</style>" +
@@ -172,7 +166,6 @@ function downloadXls(filename, headers, rows) {
     "</tr></thead><tbody>" +
     rowHtml +
     "</tbody></table></body></html>";
-
   const blob = new Blob([html], { type: "application/vnd.ms-excel" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -190,12 +183,14 @@ function karachiNowHM() {
   const fmtM = new Intl.DateTimeFormat("en-GB", { timeZone: ZONE, minute: "2-digit" });
   return { h: parseInt(fmtH.format(new Date()), 10), m: parseInt(fmtM.format(new Date()), 10) };
 }
+
 function hmToMinutes(hhmm) {
   const parts = (hhmm || "").split(":").map(Number);
   const h = parts[0];
   const m = parts[1];
   return Number.isNaN(h) || Number.isNaN(m) ? null : h * 60 + m;
 }
+
 function isInShiftNow(shiftStart, shiftEnd) {
   const nowHM = karachiNowHM();
   const now = nowHM.h * 60 + nowHM.m;
@@ -213,7 +208,6 @@ function computeDbAwareStatus(emp, ctx) {
     .filter((s) => inPickedRange(s.shiftDate, ctx.mode, ctx.day, ctx.from, ctx.to, s.idle_start))
     .find((s) => !s.end_time_local || s.end_time_local === "Ongoing");
   const onCat = ongoing && ongoing.category;
-
   if (raw === "active" || raw === "online" || raw === "working") {
     return { label: "Active", color: "success" };
   }
@@ -260,6 +254,7 @@ function toInputDate(iso) {
   const dd = pad(d.getDate());
   return `${yyyy}-${mm}-${dd}`;
 }
+
 function toInputTime(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -268,6 +263,7 @@ function toInputTime(iso) {
   const ss = pad(d.getSeconds());
   return `${hh}:${mi}:${ss}`;
 }
+
 function localDateTimeToISO(dateStr, timeStr) {
   if (!dateStr || !timeStr) return null;
   // Build a local Date and return UTC ISO
@@ -288,7 +284,6 @@ function EmployeeRow({
   const theme = useTheme();
   const [open, setOpen] = useState(Boolean(defaultOpen));
   const all = Array.isArray(emp && emp.idle_sessions) ? emp.idle_sessions : [];
-
   const grouped = useMemo(() => {
     const map = {};
     const sorted = all.slice().sort((a, b) => {
@@ -351,7 +346,6 @@ function EmployeeRow({
                 {open ? <KeyboardArrowUp /> : <KeyboardArrowDown />}
               </IconButton>
             </Tooltip>
-
             {canEdit && (
               <>
                 <Button size="small" variant="outlined" onClick={() => onEdit(emp)}>Update</Button>
@@ -361,7 +355,6 @@ function EmployeeRow({
           </Box>
         </TableCell>
       </TableRow>
-
       <TableRow>
         <TableCell colSpan={5} sx={{ p: 0 }}>
           <Collapse in={open} timeout="auto" unmountOnExit>
@@ -369,15 +362,12 @@ function EmployeeRow({
               <Typography variant="h6" gutterBottom sx={{ fontWeight: 700 }}>
                 Idle Sessions &amp; AutoBreaks
               </Typography>
-
               {Object.keys(grouped).length === 0 && (
                 <Typography color="text.secondary">No sessions in this date range.</Typography>
               )}
-
               {Object.entries(grouped).map(([key, sessions]) => {
                 const sums = calcTotals(sessions);
                 const generalExceeded = sums.general > generalLimit;
-
                 const totalBg = cardBase(theme.palette.warning.main);
                 const officialBg = cardBase(theme.palette.info.main);
                 const namazBg = cardBase(theme.palette.success.main);
@@ -415,7 +405,6 @@ function EmployeeRow({
                       >
                         {key}
                       </Typography>
-
                       <Table size="small">
                         <TableHead>
                           <TableRow>
@@ -456,7 +445,6 @@ function EmployeeRow({
                                 </TableCell>
                                 <TableCell>{s.start_time_local || "-"}</TableCell>
                                 <TableCell>{s.end_time_local || "Ongoing"}</TableCell>
-
                                 {/* REASON WRAPS ON MULTIPLE LINES */}
                                 <TableCell
                                   sx={{
@@ -470,13 +458,11 @@ function EmployeeRow({
                                 >
                                   {s.reason || (isAuto ? "System Power Off / Startup" : "-")}
                                 </TableCell>
-
                                 <TableCell>
                                   {isAuto
                                     ? (Number(s.duration || 0)).toFixed(1) + " min"
                                     : (s.duration || 0) + " min"}
                                 </TableCell>
-
                                 <TableCell align="center">
                                   {canEdit && (
                                     <Box display="flex" gap={1} justifyContent="center" flexWrap="wrap">
@@ -503,7 +489,6 @@ function EmployeeRow({
                           })}
                         </TableBody>
                       </Table>
-
                       <Box mt={2}>
                         <Grid container spacing={2}>
                           <Grid item xs={12} md={3}>
@@ -553,15 +538,11 @@ function EmployeeRow({
    ========================= */
 export default function Employees() {
   const theme = useTheme();
-
   const token = getToken();
   const role = getRole();                 // 'employee' | 'admin' | 'superadmin'
   const isEmployee = role === "employee";
   const canDownload = role === "admin" || role === "superadmin";
   const canEdit = role === "superadmin";
-
-  // attach token to axios for all calls
-  axios.defaults.headers.common["Authorization"] = token ? `Bearer ${token}` : "";
 
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
@@ -571,18 +552,15 @@ export default function Employees() {
     categoryColors: {}
   });
   const [employeeFilter, setEmployeeFilter] = useState("all");
-
   // Update modal (Employee)
   const [editOpen, setEditOpen] = useState(false);
   const [editValues, setEditValues] = useState({ id: "", name: "", department: "", shift_start: "", shift_end: "" });
-
   // Update modal (Session/Activity)
   const [editSessOpen, setEditSessOpen] = useState(false);
   const [editSessValues, setEditSessValues] = useState({
     id: "", kind: "Idle", reason: "", category: "General",
     startDate: "", startTime: "", endDate: "", endTime: ""
   });
-
   // Modes
   const [mode, setMode] = useState("day");
   const [day, setDay] = useState(currentShiftYmd());
@@ -593,14 +571,13 @@ export default function Employees() {
   const [from, setFrom] = useState(currentShiftYmd());
   const [to, setTo] = useState(currentShiftYmd());
   const [autoShiftDay, setAutoShiftDay] = useState(true);
-
   const [anchorEl, setAnchorEl] = useState(null);
   const openMenu = Boolean(anchorEl);
 
   /* ----- API fetch ----- */
   const fetchEmployees = async () => {
     try {
-      const res = await axios.get(API + "/employees", { timeout: 20000 });
+      const res = await api.get("/employees"); // 👈 USE api
       const arr = Array.isArray(res.data) ? res.data : res.data.employees || [];
       setEmployees(arr);
       const gl = res.data && res.data.settings ? res.data.settings.general_idle_limit : undefined;
@@ -617,7 +594,7 @@ export default function Employees() {
 
   const fetchConfig = async () => {
     try {
-      const res = await axios.get(API + "/config", { timeout: 15000 });
+      const res = await api.get("/config"); // 👈 USE api
       setConfig((c) => ({ ...c, ...(res.data || {}) }));
     } catch (e) {
       console.warn("Config fetch failed (using defaults).", e && e.message ? e.message : e);
@@ -686,11 +663,13 @@ export default function Employees() {
     const mm = parts[1];
     return new Date(yy, mm, 0).getDate();
   }
+
   function effectiveGeneralLimit(daysOverride) {
     const daily = config.generalIdleLimit == null ? 60 : config.generalIdleLimit;
     const mult = mode === "month" ? (daysOverride == null ? getMonthDays() : daysOverride) : 1;
     return daily * mult;
   }
+
   function effectiveNamazLimit(daysOverride) {
     const daily = config.namazLimit == null ? 50 : config.namazLimit;
     const mult = mode === "month" ? (daysOverride == null ? getMonthDays() : daysOverride) : 1;
@@ -726,9 +705,9 @@ export default function Employees() {
   async function onEditSave() {
     try {
       const { id, name, department, shift_start, shift_end } = editValues;
-      await axios.put(`${API}/employees/${encodeURIComponent(id)}`, {
+      await api.put(`/employees/${encodeURIComponent(id)}`, { // 👈 USE api
         name, department, shift_start, shift_end
-      }, { timeout: 15000 });
+      });
       setEditOpen(false);
       await fetchEmployees();
     } catch (e) {
@@ -741,7 +720,7 @@ export default function Employees() {
     if (!id) return;
     if (!window.confirm(`Delete employee "${emp.name}"? This cannot be undone.`)) return;
     try {
-      await axios.delete(`${API}/employees/${encodeURIComponent(id)}`, { timeout: 15000 });
+      await api.delete(`/employees/${encodeURIComponent(id)}`); // 👈 USE api
       await fetchEmployees();
     } catch (e) {
       alert("Delete failed: " + (e?.response?.data?.error || e.message));
@@ -775,16 +754,13 @@ export default function Employees() {
       }
       const idle_start = localDateTimeToISO(startDate, startTime);
       const idle_end = (endDate && endTime) ? localDateTimeToISO(endDate, endTime) : null;
-
       if (!idle_start) {
         alert("Start date/time is invalid.");
         return;
       }
-
-      await axios.put(`${API}/activities/${encodeURIComponent(id)}`, {
+      await api.put(`/activities/${encodeURIComponent(id)}`, { // 👈 USE api
         reason, category, idle_start, idle_end
-      }, { timeout: 15000 });
-
+      });
       setEditSessOpen(false);
       await fetchEmployees();
     } catch (e) {
@@ -795,7 +771,7 @@ export default function Employees() {
   async function onCloseSessionNow(session) {
     try {
       const id = session._id || session.id;
-      await axios.put(`${API}/activities/${encodeURIComponent(id)}/end`, {}, { timeout: 15000 });
+      await api.put(`/activities/${encodeURIComponent(id)}/end`, {}); // 👈 USE api
       await fetchEmployees();
     } catch (e) {
       alert("Close failed: " + (e?.response?.data?.error || e.message));
@@ -806,7 +782,7 @@ export default function Employees() {
     try {
       const id = session._id || session.id;
       if (!window.confirm("Delete this activity log? This cannot be undone.")) return;
-      await axios.delete(`${API}/activities/${encodeURIComponent(id)}`, { timeout: 15000 });
+      await api.delete(`/activities/${encodeURIComponent(id)}`); // 👈 USE api
       await fetchEmployees();
     } catch (e) {
       alert("Delete failed: " + (e?.response?.data?.error || e.message));
@@ -821,7 +797,6 @@ export default function Employees() {
     const seenPerCat = new Map(ORDER.map((c) => [c, new Set()]));
     if (!buckets.has(OTHER)) buckets.set(OTHER, []);
     if (!seenPerCat.has(OTHER)) seenPerCat.set(OTHER, new Set());
-
     for (const s of sessions) {
       const cat = ORDER.indexOf(s && s.category) >= 0 ? s.category : OTHER;
       const reason = (s && s.reason ? s.reason : "").trim();
@@ -833,7 +808,6 @@ export default function Employees() {
         buckets.get(cat).push(reason);
       }
     }
-
     const parts = [];
     const makeBlock = (cat, arr) => (arr && arr.length ? cat + ": " + arr.join(" | ") : null);
     for (const cat of ORDER.concat([OTHER])) {
@@ -867,15 +841,12 @@ export default function Employees() {
 
   function downloadPDFDailySummaryAll() {
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
-
     const pageW = doc.internal.pageSize.getWidth();
     const gray600 = "#4b5563";
     const brand = [31, 41, 55];
     const accent = [99, 102, 241];
-
     const label = mode === "day" ? day : from + " → " + to;
     const title = mode === "day" ? "Daily Idle Report" : mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report";
-
     const gDaily = config.generalIdleLimit == null ? 60 : config.generalIdleLimit;
     const nDaily = config.namazLimit == null ? 50 : config.namazLimit;
     const gCap = effectiveGeneralLimit();
@@ -884,29 +855,23 @@ export default function Employees() {
       mode === "month"
         ? "Limits: General " + gDaily + "m/day (cap " + gCap + "m), Namaz " + nDaily + "m/day (cap " + nCap + "m)"
         : "Limits: General " + gDaily + "m/day, Namaz " + nDaily + "m/day";
-
     const header = () => {
       doc.setFillColor(brand[0], brand[1], brand[2]);
       doc.rect(0, 0, pageW, 64, "F");
-
       doc.setFont("helvetica", "bold");
       doc.setFontSize(20);
       doc.setTextColor("#ffffff");
       doc.text("Employee Idle Report", 40, 26);
-
       doc.setFont("helvetica", "normal");
       doc.setFontSize(12);
       doc.text(title, 40, 46);
-
       doc.setFontSize(10);
       doc.text("Range: " + label + "   |   TZ: " + ZONE + "   |   " + limitsText, pageW - 40, 26, { align: "right" });
     };
-
     const body = collectReportRowsWithReasons();
     const headers = [
-      "Emp ID", "Name", "Dept", "Total (m)", "General (m)", "Namaz (m)", "Official (m)", "Auto (m)", "Reasons (by\nCategory)"
+      "Emp ID", "Name", "Dept", "Total (m)", "General (m)", "Namaz (m)", "Official (m)", "Auto (m)", "Reasons (by Category)"
     ];
-
     autoTable(doc, {
       head: [headers],
       body: body,
@@ -930,7 +895,6 @@ export default function Employees() {
       },
       didDrawPage: () => { header(); }
     });
-
     const fileLabel = mode === "day" ? day : from.split("-").join("") + "_" + to.split("-").join("");
     doc.save("employee_idle_report_" + fileLabel + ".pdf");
   }
@@ -940,15 +904,11 @@ export default function Employees() {
     for (const emp of employeesList) {
       const sessions = sessionsForEmp(emp);
       const sums = calcTotals(sessions);
-
       const days = uniqueDays(sessions).size || getMonthDays();
       const shiftSpan = shiftSpanMinutes(emp.shift_start, emp.shift_end);
-
       const workMin = Math.max(0, shiftSpan * days - sums.total);
-
       const gCap = effectiveGeneralLimit(days);
       const nCap = effectiveNamazLimit(days);
-
       rows.push([
         emp.emp_id || emp.id || emp._id,
         emp.name || "-",
@@ -970,7 +930,6 @@ export default function Employees() {
     if (mode !== "month") return;
     const list = allOrSelected === "all" ? filtered : (employeeFilter === "all" ? [] : filtered.slice(0, 1));
     if (!list.length) return;
-
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
     const pageW = doc.internal.pageSize.getWidth();
     const accent = [16, 185, 129];
@@ -990,12 +949,10 @@ export default function Employees() {
       );
     };
     header();
-
     const body = collectMonthlyRows(list);
     const headers = [
       "Emp ID","Name","Dept","Working (h)","General (h)","Namaz (h)","Official (h)","Auto (h)","Gen Exceed","Namaz Exceed","Active Days"
     ];
-
     autoTable(doc, {
       head: [headers],
       body: body,
@@ -1007,7 +964,6 @@ export default function Employees() {
         2: { halign: "left", cellWidth: 120 }
       }
     });
-
     const fname = allOrSelected === "all"
       ? "monthly_totals_" + from.split("-").join("") + "_" + to.split("-").join("") + ".pdf"
       : "monthly_" + slugName(list[0].name) + "_" + from.split("-").join("") + "_" + to.split("-").join("") + ".pdf";
@@ -1045,17 +1001,14 @@ export default function Employees() {
 
   function downloadPDFDailyDetailSelected() {
     if (employeeFilter === "all" || !filtered.length || mode !== "day") return;
-
     const emp = filtered[0];
     const empName = cleanName(emp.name);
     const sessions = sessionsForEmp(emp).sort(
       (a, b) => new Date(a.idle_start || 0) - new Date(b.idle_start || 0)
     );
     const sums = calcTotals(sessions);
-
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
     const pageW = doc.internal.pageSize.getWidth();
-
     const brand = [59, 130, 246];
     doc.setFillColor(31, 41, 55);
     doc.rect(0, 0, pageW, 64, "F");
@@ -1079,14 +1032,12 @@ export default function Employees() {
       40,
       46
     );
-
     doc.setFillColor(brand[0], brand[1], brand[2]);
     doc.roundedRect(40, 84, 340, 26, 6, 6, "F");
     doc.setFont("helvetica", "bold");
     doc.setFontSize(12);
     doc.setTextColor("#fff");
     doc.text(day + " — " + emp.shift_start + " – " + emp.shift_end, 50, 101);
-
     const body = sessions.map((s) => [
       s.category || "-",
       s.start_time_local || "-",
@@ -1094,7 +1045,6 @@ export default function Employees() {
       s.reason || "-",
       s.category === "AutoBreak" ? Number(s.duration || 0).toFixed(1) : s.duration || 0
     ]);
-
     autoTable(doc, {
       head: [["Category", "Start Time", "End Time", "Reason", "Duration (min)"]],
       body: body,
@@ -1106,7 +1056,6 @@ export default function Employees() {
       theme: "striped",
       alternateRowStyles: { fillColor: [248, 250, 252] }
     });
-
     const y = (doc.lastAutoTable?.finalY || 120) + 18;
     const boxW = 190;
     const boxH = 68;
@@ -1130,7 +1079,6 @@ export default function Employees() {
       doc.setTextColor(17, 24, 39);
       doc.text(b[1], x + 12, y + 46);
     });
-
     doc.save("daily_" + slugName(empName) + "_" + day + ".pdf");
   }
 
@@ -1149,7 +1097,6 @@ export default function Employees() {
           onChange={(e) => setSearch(e.target.value)}
           sx={{ minWidth: 260 }}
         />
-
         <Select
           size="small"
           value={employeeFilter}
@@ -1164,13 +1111,11 @@ export default function Employees() {
             </MenuItem>
           ))}
         </Select>
-
         <Select size="small" value={mode} onChange={(e) => setMode(e.target.value)}>
           <MenuItem value="day">DAILY</MenuItem>
           <MenuItem value="month">MONTHLY</MenuItem>
           <MenuItem value="range">CUSTOM RANGE</MenuItem>
         </Select>
-
         {mode === "day" && (
           <TextField
             label="Pick a day"
@@ -1181,7 +1126,6 @@ export default function Employees() {
             InputLabelProps={{ shrink: true }}
           />
         )}
-
         {mode === "month" && (
           <TextField
             label="Pick a month"
@@ -1192,16 +1136,13 @@ export default function Employees() {
             InputLabelProps={{ shrink: true }}
           />
         )}
-
         {mode === "range" && (
           <>
             <TextField label="From" type="date" size="small" value={from} onChange={(e) => setFrom(e.target.value)} InputLabelProps={{ shrink: true }} />
             <TextField label="To"   type="date" size="small" value={to}   onChange={(e) => setTo(e.target.value)}   InputLabelProps={{ shrink: true }} />
           </>
         )}
-
         <Box flex={1} />
-
         {canDownload && (
           <>
             <Button
@@ -1218,7 +1159,6 @@ export default function Employees() {
               }}>
                 {"Quick — " + quickLabel}
               </MenuItem>
-
               <MenuItem onClick={() => {
                 setAnchorEl(null);
                 if (confirmDownload("Daily — All Employees")) downloadPDFDailySummaryAll();
@@ -1234,7 +1174,6 @@ export default function Employees() {
               >
                 {"Daily — " + (selectedName || "Selected Employee")}
               </MenuItem>
-
               <MenuItem
                 disabled={mode !== "month"}
                 onClick={() => {
@@ -1253,7 +1192,6 @@ export default function Employees() {
               >
                 {"Monthly — " + (selectedName || "Selected Employee")}
               </MenuItem>
-
               <MenuItem onClick={() => {
                 setAnchorEl(null);
                 if (confirmDownload("Excel — Summary")) downloadXLS();
@@ -1264,14 +1202,12 @@ export default function Employees() {
           </>
         )}
       </Box>
-
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
         {mode === "day" ? "Range: " + day : "Range: " + from + " → " + to}
         &nbsp; | &nbsp; {employeeFilter !== "all" ? "Employee: " + selectedName : "All Employees"}
         &nbsp; | &nbsp; General: {gDaily}m/day • Namaz: {nDaily}m/day
         &nbsp; | &nbsp; TZ: {ZONE}
       </Typography>
-
       <TableContainer component={Paper} elevation={5} sx={{ borderRadius: "18px" }}>
         <Table>
           <TableHead>
@@ -1368,7 +1304,6 @@ export default function Employees() {
               onChange={(e) => setEditSessValues((v) => ({ ...v, reason: e.target.value }))}
               fullWidth
             />
-
             <TextField
               label="Start Date"
               type="date"
@@ -1386,7 +1321,6 @@ export default function Employees() {
               InputLabelProps={{ shrink: true }}
               fullWidth
             />
-
             <TextField
               label="End Date (optional)"
               type="date"
