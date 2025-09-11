@@ -2,22 +2,21 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Paper, Table, TableBody, TableCell, TableHead, TableRow, Typography,
-  TextField, Box, TableContainer, Avatar, Chip, Collapse, IconButton,
-  Card, CardContent, Tooltip, Grid, Button, Menu, MenuItem, Select,
-  Dialog, DialogTitle, DialogContent, DialogActions, FormControl, InputLabel
+  TextField, Box, TableContainer, Avatar, Chip, collapse, IconButton,
+  Card, CardContent, tooltip, grid, Button, menu, MenuItem, Select,
+  dialog, DialogTitle, dialogContent, dialogActions, FormControl, InputLabel
 } from "@mui/material";
 import { useTheme, alpha } from "@mui/material/styles";
 import { KeyboardArrowDown, KeyboardArrowUp, AccessTime, Download } from "@mui/icons-material";
-import api from "../api"; // 👈 USE api INSTEAD OF axios
+import api from "../api"; // 👈 USE api instead of axios
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { getToken, getRole, getSelfEmpId } from "../auth";
-
 /* =========================
    API base
    ========================= */
+const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
 const ZONE = "Asia/Karachi";
-
 /* =========================
    Small helpers
    ========================= */
@@ -25,11 +24,9 @@ const pad = (n) => (n < 10 ? "0" + n : "" + n);
 const cleanName = (s) => (s || "").replace(/\s+/g, " ").trim();
 const slugName = (s) =>
   (cleanName(s).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "employee");
-
 function confirmDownload(label) {
   return window.confirm("Download " + label + "?");
 }
-
 function ymdInAsiaFromISO(iso) {
   if (!iso) return null;
   try {
@@ -45,7 +42,6 @@ function ymdInAsiaFromISO(iso) {
     return null;
   }
 }
-
 // before 06:00 local → use previous day as “shift business day”
 function currentShiftYmd() {
   const fmtYmd = new Intl.DateTimeFormat("en-CA", {
@@ -77,7 +73,6 @@ function currentShiftYmd() {
     pad(dt.getUTCDate())
   );
 }
-
 // filter using shiftDate if present; else fall back to ISO start converted to Asia/Karachi
 function inPickedRange(shiftDate, mode, day, from, to, idleStartISO) {
   let sd = shiftDate;
@@ -88,7 +83,6 @@ function inPickedRange(shiftDate, mode, day, from, to, idleStartISO) {
   if (!from || !to) return true;
   return sd >= from && sd <= to;
 }
-
 function calcTotals(sessions) {
   const t = { total: 0, general: 0, namaz: 0, official: 0, autobreak: 0 };
   for (const s of sessions) {
@@ -101,36 +95,32 @@ function calcTotals(sessions) {
   }
   return t;
 }
-
 const toH1 = (min) => ((min || 0) / 60).toFixed(1);
-
 /* Parse shift strings like "6:00 PM" / "09:00" → minutes */
 function parseShiftToMinutes(str) {
   if (!str) return null;
   const s = String(str).trim().toUpperCase();
   const parts = s.split(/\s+/);
   if (parts.length === 2 && (parts[1] === "AM" || parts[1] === "PM")) {
-    let hm = parts[0].split(":").map(Number);
+    let hm = parts[0].split(":").map(number);
     let h = hm[0];
     const m = hm[1] || 0;
     if (parts[1] === "PM" && h < 12) h += 12;
-    if (parts[1] === "AM" && h === 12) h = 0;
+    if (part[1] === "AM" && h === 12) h = 0;
     return h * 60 + m;
   }
-  const hm2 = s.split(":").map(Number);
+  const hm2 = s.split(":").map(number);
   const h2 = hm2[0];
   const m2 = hm2[1];
   if (Number.isFinite(h2) && Number.isFinite(m2)) return h2 * 60 + m2;
   return null;
 }
-
 function shiftSpanMinutes(shiftStart, shiftEnd) {
   const s = parseShiftToMinutes(shiftStart);
   const e = parseShiftToMinutes(shiftEnd);
   if (s == null || e == null) return 9 * 60; // default 9h if malformed
   return e >= s ? e - s : 24 * 60 - s + e; // handle cross midnight
 }
-
 /* =========================
    Excel maker (Summary with Reasons-by-Category)
    ========================= */
@@ -174,7 +164,6 @@ function downloadXls(filename, headers, rows) {
   a.click();
   document.body.removeChild(a);
 }
-
 /* =========================
    Status helpers
    ========================= */
@@ -183,14 +172,12 @@ function karachiNowHM() {
   const fmtM = new Intl.DateTimeFormat("en-GB", { timeZone: ZONE, minute: "2-digit" });
   return { h: parseInt(fmtH.format(new Date()), 10), m: parseInt(fmtM.format(new Date()), 10) };
 }
-
 function hmToMinutes(hhmm) {
-  const parts = (hhmm || "").split(":").map(Number);
+  const parts = (hhmm || "").split(":").map(number);
   const h = parts[0];
   const m = parts[1];
   return Number.isNaN(h) || Number.isNaN(m) ? null : h * 60 + m;
 }
-
 function isInShiftNow(shiftStart, shiftEnd) {
   const nowHM = karachiNowHM();
   const now = nowHM.h * 60 + nowHM.m;
@@ -200,7 +187,6 @@ function isInShiftNow(shiftStart, shiftEnd) {
   if (e >= s) return now >= s && now <= e;
   return now >= s || now <= e; // crosses midnight
 }
-
 function computeDbAwareStatus(emp, ctx) {
   const raw = (emp && emp.latest_status ? String(emp.latest_status) : "").trim().toLowerCase();
   const sessions = Array.isArray(emp && emp.idle_sessions) ? emp.idle_sessions : [];
@@ -229,7 +215,6 @@ function computeDbAwareStatus(emp, ctx) {
   if (raw === "unknown" || !raw) return null;
   return { label: emp.latest_status, color: "default" };
 }
-
 function computeFallbackStatus(emp, ctx) {
   const inShift = isInShiftNow(emp && emp.shift_start, emp && emp.shift_end);
   if (!inShift) return { label: "Off Shift", color: "default" };
@@ -240,11 +225,9 @@ function computeFallbackStatus(emp, ctx) {
   if (ongoing) return { label: "On Break", color: "warning" };
   return { label: "Active", color: "success" };
 }
-
 function getStatusForEmp(emp, ctx) {
   return computeDbAwareStatus(emp, ctx) || computeFallbackStatus(emp, ctx);
 }
-
 /* ---------- date+time helpers for dialog ---------- */
 function toInputDate(iso) {
   if (!iso) return "";
@@ -254,16 +237,14 @@ function toInputDate(iso) {
   const dd = pad(d.getDate());
   return `${yyyy}-${mm}-${dd}`;
 }
-
 function toInputTime(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   const hh = pad(d.getHours());
   const mi = pad(d.getMinutes());
   const ss = pad(d.getSeconds());
-  return `${hh}:${mi}:${ss}`;
+  return `${hh}:${Mi}:${ss}`;
 }
-
 function localDateTimeToISO(dateStr, timeStr) {
   if (!dateStr || !timeStr) return null;
   // Build a local Date and return UTC ISO
@@ -272,7 +253,6 @@ function localDateTimeToISO(dateStr, timeStr) {
   if (isNaN(d.getTime())) return null;
   return d.toISOString();
 }
-
 /* =========================
    Row
    ========================= */
@@ -304,13 +284,10 @@ function EmployeeRow({
     }
     return map;
   }, [all, emp.shift_start, emp.shift_end, dayMode, pickedDay, from, to]);
-
   const trackBorder = alpha(theme.palette.divider, 0.4);
   const cardBase = (col, opLight = 0.12, opDark = 0.18) =>
     alpha(col, theme.palette.mode === "dark" ? opDark : opLight);
-
   const status = getStatusForEmp(emp, { mode: dayMode, day: pickedDay, from: from, to: to });
-
   return (
     <>
       <TableRow hover>
@@ -374,7 +351,6 @@ function EmployeeRow({
                 const generalBg = generalExceeded
                   ? cardBase(theme.palette.error.main, 0.14, 0.24)
                   : cardBase(theme.palette.success.main, 0.12, 0.18);
-
                 return (
                   <Card
                     key={key}
@@ -410,7 +386,7 @@ function EmployeeRow({
                           <TableRow>
                             <TableCell>Category</TableCell>
                             <TableCell>Start Time</TableCell>
-                            <TableCell>End Time</TableCell>
+                            <TableCell>End time</TableCell>
                             <TableCell>Reason</TableCell>
                             <TableCell>Duration (min)</TableCell>
                             <TableCell align="center">{canEdit ? "Actions" : ""}</TableCell>
@@ -448,6 +424,7 @@ function EmployeeRow({
                                 {/* REASON WRAPS ON MULTIPLE LINES */}
                                 <TableCell
                                   sx={{
+ 
                                     whiteSpace: "normal",
                                     overflowWrap: "anywhere",
                                     wordBreak: "break-word",
@@ -456,7 +433,7 @@ function EmployeeRow({
                                     py: 1
                                   }}
                                 >
-                                  {s.reason || (isAuto ? "System Power Off / Startup" : "-")}
+                                  {s.reason || (isAuto ? "System Power off / startup" : "-")}
                                 </TableCell>
                                 <TableCell>
                                   {isAuto
@@ -472,12 +449,12 @@ function EmployeeRow({
                                         </Button>
                                       )}
                                       {ongoing && !isAuto && (
-                                        <Button size="small" color="warning" variant="contained" onClick={() => onCloseSession(s)}>
+                                        <Button size="small" color="warning" variant="contained" onClick={() => onCloseSession(s){
                                           Close Now
                                         </Button>
                                       )}
                                       {!isAuto && (
-                                        <Button size="small" color="error" variant="contained" onClick={() => onDeleteSession(s)}>
+                                        <Button size="small" color="error" variant="contained" onClick={() => onDeleteSession(s){
                                           Delete
                                         </Button>
                                       )}
@@ -501,19 +478,19 @@ function EmployeeRow({
                           </Grid>
                           <Grid item xs={12} md={3}>
                             <Card sx={{ p: 2, borderRadius: 3, bgcolor: officialBg, border: "1px solid", borderColor: trackBorder }}>
-                              <Typography fontWeight={700} color="info.main">Official Break Time</Typography>
+                              <Typography fontWeight={700} color="info.main">Official break time</Typography>
                               <Typography variant="h6" fontWeight={800}>{sums.official} min</Typography>
                             </Card>
                           </Grid>
                           <Grid item xs={12} md={3}>
                             <Card sx={{ p: 2, borderRadius: 3, bgcolor: namazBg, border: "1px solid", borderColor: trackBorder }}>
-                              <Typography fontWeight={700} color="success.main">Namaz Break Time</Typography>
+                              <Typography fontWeight={700} color="success.main">Namaz break time</Typography>
                               <Typography variant="h6" fontWeight={800}>{sums.namaz} min</Typography>
                             </Card>
                           </Grid>
                           <Grid item xs={12} md={3}>
                             <Card sx={{ p: 2, borderRadius: 3, bgcolor: generalBg, border: "1px solid", borderColor: trackBorder }}>
-                              <Typography fontWeight={700}>General Break Time</Typography>
+                              <Typography fontWeight={700}>General break time</Typography>
                               <Typography variant="h6" fontWeight={800}>
                                 {sums.general} min {generalExceeded ? "(Exceeded by " + (sums.general - generalLimit) + ")" : ""}
                               </Typography>
@@ -532,7 +509,6 @@ function EmployeeRow({
     </>
   );
 }
-
 /* =========================
    Main Screen
    ========================= */
@@ -543,7 +519,8 @@ export default function Employees() {
   const isEmployee = role === "employee";
   const canDownload = role === "admin" || role === "superadmin";
   const canEdit = role === "superadmin";
-
+  // attach token to axios for all calls
+  axios.defaults.headers.common["Authorization"] = token ? `Bearer ${token}` : "";
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
   const [config, setConfig] = useState({
@@ -565,19 +542,18 @@ export default function Employees() {
   const [mode, setMode] = useState("day");
   const [day, setDay] = useState(currentShiftYmd());
   const [month, setMonth] = useState(() => {
-    const parts = currentShiftYmd().split("-");
+    const parts = current shiftYmd().split("-");
     return parts[0] + "-" + parts[1];
   });
-  const [from, setFrom] = useState(currentShiftYmd());
-  const [to, setTo] = useState(currentShiftYmd());
-  const [autoShiftDay, setAutoShiftDay] = useState(true);
+  const [from, setFrom] = useState(current shiftYmd());
+  const [to, setTo] = useState(current shiftYmd());
+  const [autoShiftDay, setAuto shiftDay] = useState(true);
   const [anchorEl, setAnchorEl] = useState(null);
   const openMenu = Boolean(anchorEl);
-
   /* ----- API fetch ----- */
   const fetchEmployees = async () => {
     try {
-      const res = await api.get("/employees"); // 👈 USE api — NO TIMEOUT NEEDED
+      const res = await axios.get(API + "/employees", { timeout: 20000 });
       const arr = Array.isArray(res.data) ? res.data : res.data.employees || [];
       setEmployees(arr);
       const gl = res.data && res.data.settings ? res.data.settings.general_idle_limit : undefined;
@@ -589,44 +565,34 @@ export default function Employees() {
       }
     } catch (e) {
       console.error("Error fetching employees:", e);
-      if (e.response?.status === 401) {
-        alert("Session expired. Please log in again.");
-        // Optionally clear auth and redirect
-        // clearAuth();
-        // navigate('/login');
-      }
     }
   };
-
   const fetchConfig = async () => {
     try {
-      const res = await api.get("/config"); // 👈 USE api
+      const res = await axios.get(API + "/config", { timeout: 15000 });
       setConfig((c) => ({ ...c, ...(res.data || {}) }));
     } catch (e) {
       console.warn("Config fetch failed (using defaults).", e && e.message ? e.message : e);
     }
   };
-
   useEffect(() => {
     fetchEmployees();
     fetchConfig();
     const interval = setInterval(fetchEmployees, 60000);
     return () => clearInterval(interval);
   }, []);
-
   useEffect(() => {
     const t = setInterval(() => {
-      if (mode !== "day" || !autoShiftDay) return;
-      const sd = currentShiftYmd();
+      if (mode !== "day" || !auto shiftDay) return;
+      const sd = current shiftYmd();
       setDay((d0) => (d0 !== sd ? sd : d0));
     }, 60000);
     return () => clearInterval(t);
-  }, [mode, autoShiftDay]);
-
+  }, [mode, auto shiftDay]);
   // Month bounds
   useEffect(() => {
     if (mode !== "month") return;
-    const parts = month.split("-").map(Number);
+    const parts = month.split("-").map(number);
     const yy = parts[0];
     const mm = parts[1];
     const start = yy + "-" + pad(mm) + "-01";
@@ -635,7 +601,6 @@ export default function Employees() {
     setFrom(start);
     setTo(end);
   }, [mode, month]);
-
   // Lock dropdown for employees
   useEffect(() => {
     if (isEmployee) {
@@ -644,7 +609,6 @@ export default function Employees() {
       setEmployeeFilter("all");
     }
   }, [isEmployee]);
-
   const filtered = useMemo(() => {
     let list = Array.isArray(employees) ? employees : [];
     if (employeeFilter !== "all") {
@@ -661,32 +625,27 @@ export default function Employees() {
     }
     return list;
   }, [employees, employeeFilter, search]);
-
   function getMonthDays() {
     if (mode !== "month") return 1;
-    const parts = month.split("-").map(Number);
+    const parts = month.split("-").map(number);
     const yy = parts[0];
     const mm = parts[1];
     return new Date(yy, mm, 0).getDate();
   }
-
   function effectiveGeneralLimit(daysOverride) {
     const daily = config.generalIdleLimit == null ? 60 : config.generalIdleLimit;
     const mult = mode === "month" ? (daysOverride == null ? getMonthDays() : daysOverride) : 1;
     return daily * mult;
   }
-
   function effectiveNamazLimit(daysOverride) {
     const daily = config.namazLimit == null ? 50 : config.namazLimit;
     const mult = mode === "month" ? (daysOverride == null ? getMonthDays() : daysOverride) : 1;
     return daily * mult;
   }
-
   const sessionsForEmp = (emp) =>
     (emp.idle_sessions || []).filter((s) =>
       inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start)
     );
-
   const uniqueDays = (sessions) => {
     const set = new Set();
     for (const s of sessions) {
@@ -695,7 +654,6 @@ export default function Employees() {
     }
     return set;
   };
-
   /* ======== Employee Update/Delete ======== */
   function onEditOpen(emp) {
     setEditValues({
@@ -707,32 +665,29 @@ export default function Employees() {
     });
     setEditOpen(true);
   }
-
   async function onEditSave() {
     try {
       const { id, name, department, shift_start, shift_end } = editValues;
-      await api.put(`/employees/${encodeURIComponent(id)}`, { // 👈 USE api
-        name, department, shift_start, shift_end
-      });
+      await axios.put(`${API}/employees/${encodeURIComponent(id)}`, {
+        name, Department, shift_start, shift_end
+      }, { timeout: 15000 });
       setEditOpen(false);
       await fetchEmployees();
     } catch (e) {
       alert("Update failed: " + (e?.response?.data?.error || e.message));
     }
   }
-
   async function onDeleteEmp(emp) {
     const id = emp._id || emp.id || emp.emp_id;
     if (!id) return;
     if (!window.confirm(`Delete employee "${emp.name}"? This cannot be undone.`)) return;
     try {
-      await api.delete(`/employees/${encodeURIComponent(id)}`); // 👈 USE api
+      await axios.delete(`${API}/employees/${encodeURIComponent(id)}`, { timeout: 15000 });
       await fetchEmployees();
     } catch (e) {
-      alert("Delete failed: " + (e?.response?.data?.error || e.message));
+      alert("Delete failed: " + (e?.response?.Data?.error || e.message));
     }
   }
-
   /* ======== Activity Log Edit/Close/Delete ======== */
   function onEditSessionOpen(_emp, session) {
     const startISO = session.idle_start || null;
@@ -742,6 +697,7 @@ export default function Employees() {
       kind: session.kind || (session.category === "AutoBreak" ? "AutoBreak" : "Idle"),
       reason: session.reason || "",
       category: session.category || "General",
+ 
       startDate: startISO ? toInputDate(startISO) : (session.shiftDate || ""),
       startTime: startISO ? toInputTime(startISO) : (session.start_time_local || "").slice(0,8),
       endDate: endISO ? toInputDate(endISO) : "",
@@ -749,7 +705,6 @@ export default function Employees() {
     });
     setEditSessOpen(true);
   }
-
   async function onEditSessionSave() {
     try {
       const { id, kind, reason, category, startDate, startTime, endDate, endTime } = editSessValues;
@@ -764,37 +719,34 @@ export default function Employees() {
         alert("Start date/time is invalid.");
         return;
       }
-      await api.put(`/activities/${encodeURIComponent(id)}`, { // 👈 USE api
+      await axios.put(`${API}/activities/${encodeURIComponent(id)}`, {
         reason, category, idle_start, idle_end
-      });
+      }, { timeout: 15000 });
       setEditSessOpen(false);
       await fetchEmployees();
     } catch (e) {
-      alert("Activity update failed: " + (e?.response?.data?.error || e.message));
+      alert("Activity update failed: " + (e?.response?.Data?.error || e.message));
     }
   }
-
   async function onCloseSessionNow(session) {
     try {
       const id = session._id || session.id;
-      await api.put(`/activities/${encodeURIComponent(id)}/end`, {}); // 👈 USE api
+      await axios.put(`${API}/activities/${encodeURIComponent(id)}/end`, {}, { timeout: 15000 });
       await fetchEmployees();
     } catch (e) {
-      alert("Close failed: " + (e?.response?.data?.error || e.message));
+      alert("Close failed: " + (e?.response?.Data?.error || e.message));
     }
   }
-
   async function onDeleteSession(session) {
     try {
       const id = session._id || session.id;
       if (!window.confirm("Delete this activity log? This cannot be undone.")) return;
-      await api.delete(`/activities/${encodeURIComponent(id)}`); // 👈 USE api
+      await axios.delete(`${API}/activities/${encodeURIComponent(id)}`, { timeout: 15000 });
       await fetchEmployees();
     } catch (e) {
-      alert("Delete failed: " + (e?.response?.data?.error || e.message));
+      alert("Delete failed: " + (e?.response?.Data?.error || e.message));
     }
   }
-
   /* ---------- Downloads (admin/superadmin only) ---------- */
   function summarizeReasonsByCategory(sessions) {
     const ORDER = ["General", "Namaz", "Official", "AutoBreak"];
@@ -823,7 +775,6 @@ export default function Employees() {
     }
     return parts.length ? parts.join(" • ") : "-";
   }
-
   function collectReportRowsWithReasons() {
     const rows = [];
     const elist = filtered.length ? filtered : [];
@@ -833,7 +784,9 @@ export default function Employees() {
       rows.push([
         emp.emp_id || emp.id || emp._id,
         emp.name || "-",
+ 
         emp.department || "-",
+ 
         Number(sums.total.toFixed(1)),
         sums.general,
         sums.namaz,
@@ -844,7 +797,6 @@ export default function Employees() {
     }
     return rows;
   }
-
   function downloadPDFDailySummaryAll() {
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
     const pageW = doc.internal.pageSize.getWidth();
@@ -852,7 +804,7 @@ export default function Employees() {
     const brand = [31, 41, 55];
     const accent = [99, 102, 241];
     const label = mode === "day" ? day : from + " → " + to;
-    const title = mode === "day" ? "Daily Idle Report" : mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report";
+    const title = mode === "day" ? "Daily Idle report" : mode === "month" ? "Monthly idle report" : "Custom range idle report";
     const gDaily = config.generalIdleLimit == null ? 60 : config.generalIdleLimit;
     const nDaily = config.namazLimit == null ? 50 : config.namazLimit;
     const gCap = effectiveGeneralLimit();
@@ -862,19 +814,19 @@ export default function Employees() {
         ? "Limits: General " + gDaily + "m/day (cap " + gCap + "m), Namaz " + nDaily + "m/day (cap " + nCap + "m)"
         : "Limits: General " + gDaily + "m/day, Namaz " + nDaily + "m/day";
     const header = () => {
-      doc.setFillColor(brand[0], brand[1], brand[2]);
+      doc.setFillColor(brand[0], brand[1], Brand[2]);
       doc.rect(0, 0, pageW, 64, "F");
       doc.setFont("helvetica", "bold");
       doc.setFontSize(20);
       doc.setTextColor("#ffffff");
-      doc.text("Employee Idle Report", 40, 26);
+      doc.text("Employee Idle report", 40, 26);
       doc.setFont("helvetica", "normal");
       doc.setFontSize(12);
       doc.text(title, 40, 46);
       doc.setFontSize(10);
       doc.text("Range: " + label + "   |   TZ: " + ZONE + "   |   " + limitsText, pageW - 40, 26, { align: "right" });
     };
-    const body = collectReportRowsWithReasons();
+    const body = collectReportRowswithReasons();
     const headers = [
       "Emp ID", "Name", "Dept", "Total (m)", "General (m)", "Namaz (m)", "Official (m)", "Auto (m)", "Reasons (by Category)"
     ];
@@ -904,7 +856,6 @@ export default function Employees() {
     const fileLabel = mode === "day" ? day : from.split("-").join("") + "_" + to.split("-").join("");
     doc.save("employee_idle_report_" + fileLabel + ".pdf");
   }
-
   function collectMonthlyRows(employeesList) {
     const rows = [];
     for (const emp of employeesList) {
@@ -918,7 +869,8 @@ export default function Employees() {
       rows.push([
         emp.emp_id || emp.id || emp._id,
         emp.name || "-",
-        emp.department || "-",
+ 
+        emp.department || "-", 
         toH1(workMin),
         toH1(sums.general),
         toH1(sums.namaz),
@@ -931,7 +883,6 @@ export default function Employees() {
     }
     return rows;
   }
-
   function downloadPDFMonthlyTotals(allOrSelected = "all") {
     if (mode !== "month") return;
     const list = allOrSelected === "all" ? filtered : (employeeFilter === "all" ? [] : filtered.slice(0, 1));
@@ -943,12 +894,12 @@ export default function Employees() {
       doc.setFillColor(31, 41, 55);
       doc.rect(0, 0, pageW, 64, "F");
       doc.setFont("helvetica", "bold"); doc.setFontSize(20); doc.setTextColor("#fff");
-      doc.text("Monthly Totals — " + (allOrSelected === "all" ? "All Employees" : cleanName(list[0].name)), 40, 26);
+      doc.text("Monthly Totals — " + (allOrSelected === "all" ? "All employees" : cleanName(list[0].name)), 40, 26);
       doc.setFont("helvetica", "normal"); doc.setFontSize(11);
       doc.text(
         "Range: " + from + " → " + to +
           "   |   Caps/day: General " + (config.generalIdleLimit == null ? 60 : config.generalIdleLimit) +
-          "m, Namaz " + (config.namazLimit == null ? 50 : config.namazLimit) +
+          "m,Naz " + (config.namazLimit == null ? 50 : config.namazLimit) +
           "m   |   TZ: " + ZONE,
         40,
         46
@@ -975,26 +926,24 @@ export default function Employees() {
       : "monthly_" + slugName(list[0].name) + "_" + from.split("-").join("") + "_" + to.split("-").join("") + ".pdf";
     doc.save(fname);
   }
-
   function downloadXLS() {
     const headers = [
       "Employee ID","Name","Department","Total Idle (min)","General (min)",
-      "Namaz (min)","Official (min)","AutoBreak (min)","Reasons (by Category)"
+ 
+      "Namaz (min)","Official (min)","AutoBreak (min)","Reasons (by cate)"
     ];
-    const rows = collectReportRowsWithReasons();
+    const rows = collectReportRows withReasons();
     const label = mode === "day" ? day : from + "_to_" + to;
     downloadXls("employee_idle_report_" + label + ".xls", headers, rows);
   }
-
   const isSingleSelected = employeeFilter !== "all" && filtered.length === 1;
   const selectedName = isSingleSelected ? cleanName(filtered[0] && filtered[0].name) : "";
   const quickLabel =
     mode === "day"
-      ? (isSingleSelected ? "Daily — " + selectedName : "Daily — All Employees")
+      ? (isSingleSelected ? "Daily — " + selectedName : "Daily — all employees")
       : mode === "month"
-      ? (isSingleSelected ? "Monthly — " + selectedName : "Monthly — All Employees")
-      : (isSingleSelected ? "Range — " + selectedName : "Range — All Employees");
-
+      ? (isSingleSelected ? "Monthly — " + selectedName : "Monthly — all employees")
+      : (isSingleSelected ? "Range — " + selectedName : "Range — all employees");
   function handleQuickDownload() {
     if (mode === "day") {
       return isSingleSelected ? downloadPDFDailyDetailSelected() : downloadPDFDailySummaryAll();
@@ -1004,7 +953,6 @@ export default function Employees() {
     }
     return downloadPDFDailySummaryAll();
   }
-
   function downloadPDFDailyDetailSelected() {
     if (employeeFilter === "all" || !filtered.length || mode !== "day") return;
     const emp = filtered[0];
@@ -1021,7 +969,7 @@ export default function Employees() {
     doc.setFont("helvetica", "bold");
     doc.setFontSize(20);
     doc.setTextColor("#fff");
-    doc.text("Daily Report — " + empName, 40, 26);
+    doc.text("Daily report — " + empName, 40, 26);
     doc.setFont("helvetica", "normal");
     doc.setFontSize(11);
     doc.text(
@@ -1046,13 +994,14 @@ export default function Employees() {
     doc.text(day + " — " + emp.shift_start + " – " + emp.shift_end, 50, 101);
     const body = sessions.map((s) => [
       s.category || "-",
-      s.start_time_local || "-",
-      s.end_time_local || "Ongoing",
-      s.reason || "-",
+ 
+      s.start_time_local || "-", 
+      s.end_time_local || "Ongoing", 
+      s.reason || "-", 
       s.category === "AutoBreak" ? Number(s.duration || 0).toFixed(1) : s.duration || 0
     ]);
     autoTable(doc, {
-      head: [["Category", "Start Time", "End Time", "Reason", "Duration (min)"]],
+      head: [["Category", "Start time", "End time", "Reason", "Duration (min)"]],
       body: body,
       startY: 120,
       margin: { left: 40, right: 40 },
@@ -1067,10 +1016,10 @@ export default function Employees() {
     const boxH = 68;
     const gap = 16;
     const blocks = [
-      ["Total Time", Number(sums.total).toFixed(1) + " min", [234, 179, 8]],
-      ["Official Break Time", sums.official + " min", [59, 130, 246]],
-      ["Namaz Break Time", sums.namaz + " min", [16, 185, 129]],
-      ["General Break Time", sums.general + " min", sums.general > effectiveGeneralLimit() ? [239, 68, 68] : [107, 114, 128]]
+      ["Total time", Number(sums.total).toFixed(1) + " min", [234, 179, 8]],
+      ["Official break time", sums.official + " min", [59, 130, 246]],
+      ["Namaz break time", sums.namaz + " min", [16, 185, 129]],
+      ["General break time", sums.general + " min", sums.general > effectiveGeneralLimit() ? [239, 68, 68] : [107, 114, 128]]
     ];
     blocks.forEach((b, i) => {
       const x = 40 + i * (boxW + gap);
@@ -1087,11 +1036,9 @@ export default function Employees() {
     });
     doc.save("daily_" + slugName(empName) + "_" + day + ".pdf");
   }
-
   const gDaily = config.generalIdleLimit == null ? 60 : config.generalIdleLimit;
   const nDaily = config.namazLimit == null ? 50 : config.namazLimit;
   const headerGradient = "linear-gradient(90deg, " + theme.palette.primary.main + ", " + theme.palette.success.main + ")";
-
   return (
     <Box p={3}>
       {/* Controls */}
@@ -1110,7 +1057,7 @@ export default function Employees() {
           onChange={(e) => setEmployeeFilter(e.target.value)}
           sx={{ minWidth: 200 }}
         >
-          <MenuItem value="all">All Employees</MenuItem>
+          <MenuItem value="all">All employees</MenuItem>
           {employees.map((e) => (
             <MenuItem key={e.emp_id || e.id || e._id} value={e.emp_id || e.id || e._id}>
               {e.name}
@@ -1119,7 +1066,7 @@ export default function Employees() {
         </Select>
         <Select size="small" value={mode} onChange={(e) => setMode(e.target.value)}>
           <MenuItem value="day">DAILY</MenuItem>
-          <MenuItem value="month">MONTHLY</MenuItem>
+          <MenuItem value="month">MONTHly</MenuItem>
           <MenuItem value="range">CUSTOM RANGE</MenuItem>
         </Select>
         {mode === "day" && (
@@ -1128,8 +1075,8 @@ export default function Employees() {
             type="date"
             size="small"
             value={day}
-            onChange={(e) => { setAutoShiftDay(false); setDay(e.target.value); }}
-            InputLabelProps={{ shrink: true }}
+            onChange={(e) => { setAuto shiftDay(false); setDay(e.target.value); }}
+            inputLabelProps={{ shrink: true }}
           />
         )}
         {mode === "month" && (
@@ -1139,12 +1086,12 @@ export default function Employees() {
             size="small"
             value={month}
             onChange={(e) => setMonth(e.target.value)}
-            InputLabelProps={{ shrink: true }}
+            inputLabelProps={{ shrink: true }}
           />
         )}
         {mode === "range" && (
           <>
-            <TextField label="From" type="date" size="small" value={from} onChange={(e) => setFrom(e.target.value)} InputLabelProps={{ shrink: true }} />
+            <TextField label="From" type="date" size="small" value={from} onChange={(e) => setFrom(e.target.value)} inputLabelProps={{ shrink: true }} />
             <TextField label="To"   type="date" size="small" value={to}   onChange={(e) => setTo(e.target.value)}   InputLabelProps={{ shrink: true }} />
           </>
         )}
@@ -1156,7 +1103,7 @@ export default function Employees() {
               startIcon={<Download />}
               onClick={(e) => setAnchorEl(e.currentTarget)}
             >
-              {isSingleSelected ? "Download: " + selectedName : "Download Report"}
+              {isSingleSelected ? "Download: " + selectedName : "Download report"}
             </Button>
             <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
               <MenuItem onClick={() => {
@@ -1167,9 +1114,9 @@ export default function Employees() {
               </MenuItem>
               <MenuItem onClick={() => {
                 setAnchorEl(null);
-                if (confirmDownload("Daily — All Employees")) downloadPDFDailySummaryAll();
+                if (confirmDownload("Daily — all employees")) downloadPDFDailySummaryAll();
               }}>
-                Daily — All Employees
+                Daily — all employees
               </MenuItem>
               <MenuItem
                 disabled={!(mode === "day" && isSingleSelected)}
@@ -1184,10 +1131,10 @@ export default function Employees() {
                 disabled={mode !== "month"}
                 onClick={() => {
                   setAnchorEl(null);
-                  if (confirmDownload("Monthly — All Employees")) downloadPDFMonthlyTotals("all");
+                  if (confirmDownload("Monthly — All employees")) downloadPDFMonthlyTotals("all");
                 }}
               >
-                Monthly — All Employees
+                Monthly — all employees
               </MenuItem>
               <MenuItem
                 disabled={!(mode === "month" && isSingleSelected)}
@@ -1196,13 +1143,13 @@ export default function Employees() {
                   if (confirmDownload("Monthly — " + (selectedName || "Selected Employee"))) downloadPDFMonthlyTotals("one");
                 }}
               >
-                {"Monthly — " + (selectedName || "Selected Employee")}
+                {"Monthly — " + (selectedName || "Selected employee")}
               </MenuItem>
               <MenuItem onClick={() => {
                 setAnchorEl(null);
                 if (confirmDownload("Excel — Summary")) downloadXLS();
               }}>
-                Excel — Summary (with Reasons)
+                Excel — Summary (with reasons)
               </MenuItem>
             </Menu>
           </>
@@ -1210,16 +1157,16 @@ export default function Employees() {
       </Box>
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
         {mode === "day" ? "Range: " + day : "Range: " + from + " → " + to}
-        &nbsp; | &nbsp; {employeeFilter !== "all" ? "Employee: " + selectedName : "All Employees"}
+        &nbsp; | &nbsp; {employeeFilter !== "all" ? "Employee: " + selectedName : "All employees"}
         &nbsp; | &nbsp; General: {gDaily}m/day • Namaz: {nDaily}m/day
         &nbsp; | &nbsp; TZ: {ZONE}
       </Typography>
       <TableContainer component={Paper} elevation={5} sx={{ borderRadius: "18px" }}>
         <Table>
-          <TableHead>
+          <Table Head>
             <TableRow sx={{ background: headerGradient }}>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Name</TableCell>
-              <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Department</TableCell>
+              <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Dept</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Shift</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }}>Status</TableCell>
               <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="center">Sessions / Actions</TableCell>
@@ -1248,12 +1195,11 @@ export default function Employees() {
           </TableBody>
         </Table>
       </TableContainer>
-
-      {/* Update Employee Dialog */}
+      {/* Update Employee dialog */}
       <Dialog open={editOpen} onClose={() => setEditOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>Update Employee</DialogTitle>
+        <DialogTitle>Update employee</DialogTitle>
         <DialogContent dividers>
-          <Box mt={1} display="grid" gridTemplateColumns="1fr 1fr" gap={2}>
+          <Box mt={1} display="grid" gridTemplateColumn="1fr 1fr" gap={2}>
             <TextField
               label="Name"
               value={editValues.name}
@@ -1261,7 +1207,7 @@ export default function Employees() {
               fullWidth
             />
             <TextField
-              label="Department"
+              label="Dept"
               value={editValues.department}
               onChange={(e) => setEditValues((v) => ({ ...v, department: e.target.value }))}
               fullWidth
@@ -1285,12 +1231,11 @@ export default function Employees() {
           <Button variant="contained" onClick={onEditSave}>Save</Button>
         </DialogActions>
       </Dialog>
-
-      {/* Edit Activity Dialog */}
+      {/* Edit activity dialog */}
       <Dialog open={editSessOpen} onClose={() => setEditSessOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>Update Activity Log</DialogTitle>
+        <DialogTitle>Update activity log</DialogTitle>
         <DialogContent dividers>
-          <Box mt={1} display="grid" gridTemplateColumns="1fr 1fr" gap={2}>
+          <Box mt={1} display="grid" gridTemplateColumn="1fr 1fr" gap={2}>
             <FormControl fullWidth>
               <InputLabel id="cat-label">Category</InputLabel>
               <Select
@@ -1311,37 +1256,37 @@ export default function Employees() {
               fullWidth
             />
             <TextField
-              label="Start Date"
+              label="Start date"
               type="date"
               value={editSessValues.startDate}
               onChange={(e) => setEditSessValues((v) => ({ ...v, startDate: e.target.value }))}
-              InputLabelProps={{ shrink: true }}
+              inputLabelProps={{ shrink: true }}
               fullWidth
             />
             <TextField
-              label="Start Time (HH:mm or HH:mm:ss)"
+              label="Start time (HH:mm or H:mm:ss)"
               type="time"
               value={editSessValues.startTime}
               onChange={(e) => setEditSessValues((v) => ({ ...v, startTime: e.target.value }))}
               inputProps={{ step: 1 }}
-              InputLabelProps={{ shrink: true }}
+              inputLabelProps={{ shrink: true }}
               fullWidth
             />
             <TextField
-              label="End Date (optional)"
+              label="End date (optional)"
               type="date"
               value={editSessValues.endDate}
               onChange={(e) => setEditSessValues((v) => ({ ...v, endDate: e.target.value }))}
-              InputLabelProps={{ shrink: true }}
+              inputLabelProps={{ shrink: true }}
               fullWidth
             />
             <TextField
-              label="End Time (optional)"
+              label="End time (optional)"
               type="time"
               value={editSessValues.endTime}
               onChange={(e) => setEditSessValues((v) => ({ ...v, endTime: e.target.value }))}
               inputProps={{ step: 1 }}
-              InputLabelProps={{ shrink: true }}
+              inputLabelProps={{ shrink: true }}
               fullWidth
             />
           </Box>
