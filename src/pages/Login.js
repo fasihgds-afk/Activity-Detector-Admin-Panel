@@ -8,11 +8,11 @@ import LockIcon from "@mui/icons-material/Lock";
 import axios from "axios";
 import { saveAuth } from "../auth";
 
-const API = process.env.REACT_APP_API_URL || "http://localhost:3000";
+const API = process.env.REACT_APP_API_URL || "http://localhost:8080";
 
 export default function Login() {
   const [mode, setMode] = useState("employee"); // 'employee' | 'admin'
-  const [identifier, setIdentifier] = useState(""); // emp_id OR admin/super username
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [alert, setAlert] = useState({ open: false, type: "success", msg: "" });
@@ -38,14 +38,10 @@ export default function Login() {
   }
 
   return (
-    <Box sx={{
-      height: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
-      background: "linear-gradient(135deg,#6366F1,#14B8A6)",
-    }}>
-      <Paper elevation={12} sx={{
-        p: 6, width: 420, borderRadius: "20px", textAlign: "center",
-        backdropFilter: "blur(10px)", background: "rgba(255,255,255,0.9)",
-      }}>
+    <Box sx={{ height: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+      background: "linear-gradient(135deg,#6366F1,#14B8A6)" }}>
+      <Paper elevation={12} sx={{ p: 6, width: 420, borderRadius: "20px", textAlign: "center",
+        backdropFilter: "blur(10px)", background: "rgba(255,255,255,0.9)" }}>
         <Avatar sx={{
           background: "linear-gradient(135deg, rgba(99,102,241,1) 0%, rgba(20,184,166,1) 100%)",
           width: 64, height: 64, margin: "0 auto", mb: 2,
@@ -83,16 +79,10 @@ export default function Login() {
             />
           )}
 
-          <Button
-            type="submit"
-            fullWidth
-            disabled={loading}
-            sx={{
-              mt: 3, py: 1.5, fontWeight: "bold", fontSize: "16px", borderRadius: "12px",
+          <Button type="submit" fullWidth disabled={loading}
+            sx={{ mt: 3, py: 1.5, fontWeight: "bold", fontSize: "16px", borderRadius: "12px",
               background: "linear-gradient(90deg,#6366F1,#14B8A6)", color: "#fff",
-              "&:hover": { background: "linear-gradient(90deg,#4f46e5,#0d9488)" },
-            }}
-          >
+              "&:hover": { background: "linear-gradient(90deg,#4f46e5,#0d9488)" } }}>
             {loading ? <CircularProgress size={26} color="inherit" /> : "Login"}
           </Button>
         </form>
@@ -109,3 +99,4 @@ export default function Login() {
     </Box>
   );
 }
+
