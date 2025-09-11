@@ -1,9 +1,32 @@
-// src/auth.js
-export function saveAuth(obj) { localStorage.setItem("auth_v2", JSON.stringify(obj)); }
-export function loadAuth() {
-  try { return JSON.parse(localStorage.getItem("auth_v2") || "{}"); } catch { return {}; }
+// src/auth.js — tiny helpers used by pages
+
+const KEY = "auth.v1";
+
+export function saveAuth(payload) {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(payload || {}));
+  } catch {}
 }
-export function getToken() { return loadAuth()?.token || ""; }
-export function getRole() { return loadAuth()?.user?.role || null; }          // 'employee' | 'admin' | 'superadmin'
-export function getSelfEmpId() { return loadAuth()?.user?.emp_id || null; }   // only for employee
-export function clearAuth() { localStorage.removeItem("auth_v2"); }
+export function clearAuth() {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {}
+}
+export function getAuth() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+export function getToken() {
+  return getAuth().token || "";
+}
+export function getRole() {
+  return (getAuth().user && getAuth().user.role) || "";
+}
+export function getSelfEmpId() {
+  return (getAuth().user && getAuth().user.emp_id) || "";
+}
+
