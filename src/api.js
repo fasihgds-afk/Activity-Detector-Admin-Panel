@@ -9,17 +9,10 @@ const api = axios.create({
   timeout: 20000,
 });
 
-// attach Authorization on every request
 api.interceptors.request.use((config) => {
-  const t = getToken(); // 👈 Fixed: was getToken?.() → just getToken()
+  const t = getToken(); // ✅ Always fresh, never stale
   if (t) config.headers.Authorization = `Bearer ${t}`;
   return config;
 });
-
-// optional: surface 401s nicely
-api.interceptors.response.use(
-  (res) => res,
-  (err) => Promise.reject(err)
-);
 
 export default api;
