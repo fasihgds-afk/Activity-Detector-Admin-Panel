@@ -19,15 +19,34 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [role, setRole] = useState("employee"); // UI-only (for the tabs look)
+  const [role, setRole] = useState("employee"); // "employee" | "admin"
+
+  const isEmployeeMode = role === "employee";
+  const employeeOk = /^\d{6}$/.test(identifier);
+  const adminOk = identifier.trim().length > 0 && password.trim().length > 0;
+
+  function handleIdentifierChange(e) {
+    const raw = e.target.value;
+    if (isEmployeeMode) {
+      // Only digits, max 6
+      setIdentifier(raw.replace(/\D/g, "").slice(0, 6));
+    } else {
+      setIdentifier(raw);
+    }
+  }
 
   async function onSubmit(e) {
     e.preventDefault();
     setErr("");
     setBusy(true);
     try {
-      const { data } = await api.post("/auth/login", { identifier, password });
+      const payload = isEmployeeMode
+        ? { identifier } // send only the ID
+        : { identifier, password };
+
+      const { data } = await api.post("/auth/login", payload);
       if (!data?.token || !data?.user) throw new Error("Bad response");
+
       localStorage.setItem("token", data.token);
       localStorage.setItem("user", JSON.stringify(data.user));
       window.location.replace("/employees");
@@ -46,16 +65,15 @@ export default function Login() {
         display: "grid",
         placeItems: "center",
         p: 2,
-        // full-screen gradient like the screenshot
         background: "linear-gradient(135deg, #5a67e6 0%, #22c1c3 100%)",
       }}
     >
       <Paper
         elevation={8}
         sx={{
-          p: 5,
+          p: { xs: 4, sm: 5 },
           width: "100%",
-          maxWidth: 480,
+          maxWidth: 520,
           borderRadius: 4,
           bgcolor: "rgba(255,255,255,0.95)",
           boxShadow: "0 24px 48px rgba(0,0,0,0.18)",
@@ -83,7 +101,7 @@ export default function Login() {
           Employee Monitor — Login
         </Typography>
 
-        {/* Segmented tabs for look/feel only */}
+        {/* Segment buttons (visual like your design) */}
         <ToggleButtonGroup
           exclusive
           value={role}
@@ -115,29 +133,39 @@ export default function Login() {
           </Alert>
         )}
 
-        <form onSubmit={onSubmit}>
+        <form onSubmit={onSubmit} noValidate>
           <TextField
-            label="Employee ID *"
-            placeholder="Email / Username / Emp ID"
+            label={isEmployeeMode ? "Employee ID *" : "Email / Username / Emp ID"}
+            placeholder={isEmployeeMode ? "Six digits (e.g., 123456)" : ""}
             fullWidth
             margin="normal"
             value={identifier}
-            onChange={(e) => setIdentifier(e.target.value)}
+            onChange={handleIdentifierChange}
+            autoFocus
+            inputProps={
+              isEmployeeMode
+                ? { inputMode: "numeric", pattern: "\\d{6}", maxLength: 6 }
+                : undefined
+            }
+            helperText={isEmployeeMode ? "Enter your 6-digit employee ID" : " "}
           />
-          <TextField
-            label="Password"
-            type="password"
-            fullWidth
-            margin="normal"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
+
+          {!isEmployeeMode && (
+            <TextField
+              label="Password"
+              type="password"
+              fullWidth
+              margin="normal"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          )}
 
           <Button
             variant="contained"
             type="submit"
             fullWidth
-            disabled={busy}
+            disabled={busy || (isEmployeeMode ? !employeeOk : !adminOk)}
             startIcon={busy ? <CircularProgress size={18} sx={{ color: "#fff" }} /> : null}
             sx={{
               mt: 2,
@@ -168,3 +196,4 @@ export default function Login() {
     </Box>
   );
 }
+
