@@ -29,7 +29,6 @@ export default function Login() {
   function handleIdentifierChange(e) {
     const raw = e.target.value;
     if (isEmployeeMode) {
-      // Only digits, max 6
       setIdentifier(raw.replace(/\D/g, "").slice(0, 6));
     } else {
       setIdentifier(raw);
@@ -45,10 +44,10 @@ export default function Login() {
       const { data } = await api.post("/auth/login", payload);
       if (!data?.token || !data?.user) throw new Error("Bad response");
 
-      // use unified auth storage so api/auth utilities work
+      // central auth store
       saveAuth({ token: data.token, user: data.user });
 
-      // go straight to employees list (RBAC will shape what they see)
+      // landing: employees screen
       window.location.replace("/employees");
     } catch (e2) {
       const msg = e2?.response?.data?.error || e2.message || "Login failed";
@@ -80,7 +79,6 @@ export default function Login() {
           textAlign: "center",
         }}
       >
-        {/* Lock badge */}
         <Box
           sx={{
             width: 64,
@@ -101,7 +99,6 @@ export default function Login() {
           Employee Monitor — Login
         </Typography>
 
-        {/* Employee vs Admin/Super switch */}
         <ToggleButtonGroup
           exclusive
           value={role}
@@ -196,4 +193,5 @@ export default function Login() {
     </Box>
   );
 }
+
 
