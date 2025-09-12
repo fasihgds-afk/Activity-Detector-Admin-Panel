@@ -23,7 +23,6 @@ export default function Login() {
   const [role, setRole] = useState("employee"); // "employee" | "admin"
 
   const isEmployeeMode = role === "employee";
-  // enforce exactly 6 digits for employee login
   const employeeOk = /^\d{6}$/.test(identifier);
   const adminOk = identifier.trim().length > 0 && password.trim().length > 0;
 
@@ -42,15 +41,14 @@ export default function Login() {
     setErr("");
     setBusy(true);
     try {
-      const payload = isEmployeeMode
-        ? { identifier } // send only the ID
-        : { identifier, password };
-
+      const payload = isEmployeeMode ? { identifier } : { identifier, password };
       const { data } = await api.post("/auth/login", payload);
       if (!data?.token || !data?.user) throw new Error("Bad response");
 
-      // store token & user centrally (axios will attach Authorization Bearer)
+      // use unified auth storage so api/auth utilities work
       saveAuth({ token: data.token, user: data.user });
+
+      // go straight to employees list (RBAC will shape what they see)
       window.location.replace("/employees");
     } catch (e2) {
       const msg = e2?.response?.data?.error || e2.message || "Login failed";
@@ -103,7 +101,7 @@ export default function Login() {
           Employee Monitor — Login
         </Typography>
 
-        {/* Role segment buttons */}
+        {/* Employee vs Admin/Super switch */}
         <ToggleButtonGroup
           exclusive
           value={role}
@@ -198,3 +196,4 @@ export default function Login() {
     </Box>
   );
 }
+
