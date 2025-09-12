@@ -1,5 +1,5 @@
-// Dashboard.jsx — TODAY-first fetch, lightweight queries, MUI + Recharts
-// Drop into src/pages/Dashboard.jsx (or your equivalent route)
+// src/pages/Dashboard.jsx
+// TODAY-first fetch, MUI + Recharts, role-aware exports/drilldown
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -27,10 +27,22 @@ import {
   ToggleButtonGroup,
 } from "@mui/material";
 import { useTheme, alpha } from "@mui/material/styles";
-import { PieChart, Pie, Cell, Tooltip as RTooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis } from "recharts";
+import {
+  PieChart,
+  Pie,
+  Cell,
+  Tooltip as RTooltip,
+  Legend,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+} from "recharts";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import api from "../api";
+import { getRole, getSelfEmpId } from "../auth";
 
 // ---------- small utils ----------
 const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
@@ -94,6 +106,10 @@ function useColors(theme) {
 export default function Dashboard() {
   const theme = useTheme();
   const C = useColors(theme);
+
+  const role = getRole();
+  const isEmployee = role === "employee";
+  const selfId = getSelfEmpId();
 
   const [employees, setEmployees] = useState([]);
   const [limits, setLimits] = useState({ general: 60, namaz: 50 });
@@ -241,7 +257,7 @@ export default function Dashboard() {
     [totalsToday]
   );
 
-  // ---------- Export helpers (unchanged visual) ----------
+  // ---------- Export helpers ----------
   function exportPDF() {
     const label = scope === "today" ? todayYmd : `${monthStart} → ${monthEnd} (${daysInMonth} days)`;
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
@@ -298,10 +314,11 @@ export default function Dashboard() {
       .map((h) => `<th style="background:#111827;color:#fff;padding:10px 8px;border:1px solid #e5e7eb;text-align:center;font-weight:700">${h}</th>`)
       .join("");
     const rowHtml = rows
-      .map((r) =>
-        `<tr>${r
-          .map((c) => `<td style="padding:8px;border:1px solid #e5e7eb;text-align:center">${String(c)}</td>`)
-          .join("")}</tr>`
+      .map(
+        (r) =>
+          `<tr>${r
+            .map((c) => `<td style="padding:8px;border:1px solid #e5e7eb;text-align:center">${String(c)}</td>`)
+            .join("")}</tr>`
       )
       .join("");
     const html = `<html><head><meta charset="utf-8" />
@@ -317,16 +334,7 @@ export default function Dashboard() {
   }
 
   function exportXLS() {
-    const headers = [
-      "Rank",
-      "Name",
-      "Department",
-      "Status",
-      "General (m)",
-      "Namaz (m)",
-      "Official (m)",
-      "Total (m)",
-    ];
+    const headers = ["Rank", "Name", "Department", "Status", "General (m)", "Namaz (m)", "Official (m)", "Total (m)"];
     const rows = leaderboard.map((r) => [r.rank, r.name, r.department, r.status, r.general, r.namaz, r.official, r.total]);
     const fileLabel = scope === "today" ? todayYmd : `${monthStart.replaceAll("-", "")}_${monthEnd.replaceAll("-", "")}`;
     downloadXls(`leaderboard_${fileLabel}.xls`, headers, rows);
@@ -419,8 +427,13 @@ export default function Dashboard() {
             <ToggleButton value="month">This Month</ToggleButton>
           </ToggleButtonGroup>
 
-          <Button variant="contained" onClick={exportPDF}>Export PDF</Button>
-          <Button variant="outlined" onClick={exportXLS}>Export Excel</Button>
+          {/* Employees cannot export */}
+          {!isEmployee && (
+            <>
+              <Button variant="contained" onClick={exportPDF}>Export PDF</Button>
+              <Button variant="outlined" onClick={exportXLS}>Export Excel</Button>
+            </>
+          )}
         </Box>
       </Card>
 
@@ -430,11 +443,16 @@ export default function Dashboard() {
           <Typography variant="h6" fontWeight={600}>Break Usage Summary (Today)</Typography>
           <Select size="small" value={selectedEmp} onChange={(e) => setSelectedEmp(e.target.value)}>
             <MenuItem value="all">All Employees</MenuItem>
-            {employees.map((emp) => (
-              <MenuItem key={emp.id || emp.emp_id || emp._id} value={emp.id || emp.emp_id || emp._id}>
-                {emp.name}
-              </MenuItem>
-            ))}
+            {/* Employees can only choose themselves */}
+            {isEmployee ? (
+              <MenuItem value="me">Me</MenuItem>
+            ) : (
+              employees.map((emp) => (
+                <MenuItem key={emp.id || emp.emp_id || emp._id} value={emp.id || emp.emp_id || emp._id}>
+                  {emp.name}
+                </MenuItem>
+              ))
+            )}
           </Select>
         </Box>
         <Divider sx={{ my: 2 }} />
@@ -445,7 +463,8 @@ export default function Dashboard() {
                 selectedEmp === "all"
                   ? donutData
                   : (() => {
-                      const emp = employees.find((e) => (e.id || e.emp_id || e._id) === selectedEmp);
+                      const targetId = selectedEmp === "me" ? selfId : selectedEmp;
+                      const emp = employees.find((e) => (e.id || e.emp_id || e._id) === targetId);
                       const ses = (emp?.idle_sessions || []).filter((s) => ymdOf(s) === todayYmd);
                       const agg = (c) => ses.reduce((a, s) => a + (s.category === c ? (s.duration || 0) : 0), 0);
                       return [
@@ -480,9 +499,7 @@ export default function Dashboard() {
           <BarChart
             data={employees.map((emp) => {
               const ses = (emp.idle_sessions || []).filter((s) => ymdOf(s) === todayYmd);
-              let g = 0,
-                n = 0,
-                o = 0;
+              let g = 0, n = 0, o = 0;
               for (const s of ses) {
                 const d = Number(s.duration) || 0;
                 if (s.category === "General") g += d;
@@ -510,8 +527,8 @@ export default function Dashboard() {
           Leaderboard — Obedience ({scope === "today" ? "Today" : `This Month (${daysInMonth} days)`})
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Sorted with most obedient at top. Colors: <b style={{ color: theme.palette.success.main }}>Green</b> = Obedient,{' '}
-          <b style={{ color: theme.palette.warning.main }}>Amber</b> = Near limit,{' '}
+          Sorted with most obedient at top. Colors: <b style={{ color: theme.palette.success.main }}>Green</b> = Obedient,{" "}
+          <b style={{ color: theme.palette.warning.main }}>Amber</b> = Near limit,{" "}
           <b style={{ color: theme.palette.error.main }}>Red</b> = Exceeded.
         </Typography>
         <Divider sx={{ mb: 2 }} />
@@ -591,10 +608,3 @@ export default function Dashboard() {
     </Box>
   );
 }
-
-
-
-
-
-
-
