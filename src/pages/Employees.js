@@ -41,6 +41,7 @@ import {
   DeleteOutline,
   Close,
   Save,
+  FlagRounded,          // 👈 added for exceed flags
 } from "@mui/icons-material";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -197,7 +198,7 @@ function summarizeReasonsByCategory(sessions) {
   const OTHER = "Other";
   const buckets = new Map(ORDER.map((c) => [c, []]));
   const seenPerCat = new Map(ORDER.map((c) => [c, new Set()]));
-  if (!buckets.has(OTHER)) buckets.set(OTHER, []); // shouldn't happen
+  if (!buckets.has(OTHER)) buckets.set(OTHER, []);
   if (!seenPerCat.has(OTHER)) seenPerCat.set(OTHER, new Set());
   for (const s of sessions) {
     const cat = ORDER.indexOf(s && s.category) >= 0 ? s.category : OTHER;
@@ -239,12 +240,13 @@ function EmployeeRow({
   to,
   categoryColors,
   defaultOpen = false,
-  showActions = false,
+  showActions = false,       // employee card actions (superadmin only)
   onEdit,
   onDelete,
-  canManageLogs = false,
+  canManageLogs = false,     // 👈 log CRUD (superadmin only)
   onEditLog,
   onDeleteLog,
+  limits = { general: 60, namaz: 40 }, // 👈 daily limits used for flags
 }) {
   const theme = useTheme();
   const [open, setOpen] = useState(Boolean(defaultOpen));
@@ -340,35 +342,75 @@ function EmployeeRow({
               <Typography variant="h6" gutterBottom sx={{ fontWeight: 700 }}>
                 Idle Sessions & AutoBreaks
               </Typography>
+
               {Object.keys(grouped).length === 0 && (
                 <Typography color="text.secondary">No sessions in this date range.</Typography>
               )}
+
               {Object.entries(grouped).map(([key, sessions]) => {
                 const sums = calcTotals(sessions);
+
+                // 👇 per-day exceed checks (your screenshot case)
+                const genExceeded = sums.general > (limits.general ?? 60);
+                const namExceeded = sums.namaz > (limits.namaz ?? 40);
+                const genOverBy = Math.max(0, sums.general - (limits.general ?? 60));
+                const namOverBy = Math.max(0, sums.namaz - (limits.namaz ?? 40));
+
                 const totalBg = cardBase(theme.palette.warning.main);
                 const officialBg = cardBase(theme.palette.info.main);
                 const namazBg = cardBase(theme.palette.success.main);
                 const generalBg = cardBase(theme.palette.warning.main);
+
                 return (
                   <Card
                     key={key}
                     sx={{ mb: 3, borderRadius: 3, boxShadow: 3, border: "1px solid", borderColor: trackBorder }}
                   >
                     <CardContent>
-                      <Typography
-                        variant="subtitle1"
-                        fontWeight={700}
-                        sx={{
-                          mb: 2,
-                          color: theme.palette.getContrastText(theme.palette.primary.main),
-                          bgcolor: theme.palette.primary.main,
-                          p: 1,
-                          borderRadius: 2,
-                          display: "inline-block",
-                        }}
+                      <Box
+                        display="flex"
+                        alignItems="center"
+                        justifyContent="space-between"
+                        flexWrap="wrap"
+                        gap={1}
+                        sx={{ mb: 2 }}
                       >
-                        {key}
-                      </Typography>
+                        <Typography
+                          variant="subtitle1"
+                          fontWeight={700}
+                          sx={{
+                            color: theme.palette.getContrastText(theme.palette.primary.main),
+                            bgcolor: theme.palette.primary.main,
+                            px: 1.2,
+                            py: 0.75,
+                            borderRadius: 2,
+                            display: "inline-block",
+                          }}
+                        >
+                          {key}
+                        </Typography>
+
+                        {/* 🚩 chips if exceeded */}
+                        <Box display="flex" gap={1} flexWrap="wrap">
+                          {genExceeded && (
+                            <Chip
+                              icon={<FlagRounded />}
+                              color="error"
+                              label={`General exceeded by ${genOverBy} min`}
+                              sx={{ fontWeight: 700 }}
+                            />
+                          )}
+                          {namExceeded && (
+                            <Chip
+                              icon={<FlagRounded />}
+                              color="error"
+                              label={`Namaz exceeded by ${namOverBy} min`}
+                              sx={{ fontWeight: 700 }}
+                            />
+                          )}
+                        </Box>
+                      </Box>
+
                       <Table size="small">
                         <TableHead>
                           <TableRow>
@@ -426,6 +468,7 @@ function EmployeeRow({
                                     : (s.duration || 0) + " min"}
                                 </TableCell>
 
+                                {/* 👇 only SUPERADMIN sees CRUD buttons */}
                                 {canManageLogs && (
                                   <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
                                     {!isAuto && (
@@ -509,6 +552,11 @@ function EmployeeRow({
                               <Typography variant="h6" fontWeight={800}>
                                 {sums.namaz} min
                               </Typography>
+                              {namExceeded && (
+                                <Typography variant="caption" color="error.main" fontWeight={700}>
+                                  🚩 Exceeded by {namOverBy} min
+                                </Typography>
+                              )}
                             </Card>
                           </Grid>
                           <Grid item xs={12} md={3}>
@@ -525,6 +573,11 @@ function EmployeeRow({
                               <Typography variant="h6" fontWeight={800}>
                                 {sums.general} min
                               </Typography>
+                              {genExceeded && (
+                                <Typography variant="caption" color="error.main" fontWeight={700}>
+                                  🚩 Exceeded by {genOverBy} min
+                                </Typography>
+                              )}
                             </Card>
                           </Grid>
                         </Grid>
@@ -546,15 +599,17 @@ export default function Employees() {
   const role = getRole(); // 'employee' | 'admin' | 'superadmin'
   const isEmployee = role === "employee";
   const isSuper = role === "superadmin";
+
+  // ✅ admin can only download; CRUD is superadmin-only
   const canDownload = role === "admin" || role === "superadmin";
-  const canManageLogs = role === "admin" || role === "superadmin";
+  const canManageLogs = role === "superadmin"; // 👈 changed from (admin || superadmin)
 
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
 
-  // Defaults: 60 / 40 caps on frontend
+  // Frontend caps (fallbacks): General 60 / Namaz 40
   const [config, setConfig] = useState({
     generalIdleLimit: 60,
     namazLimit: 40,
@@ -591,7 +646,7 @@ export default function Employees() {
   });
   const [deleteOpen, setDeleteOpen] = useState(false);
 
-  // log edit/delete (admin/super)
+  // log edit/delete (super)
   const [logEditOpen, setLogEditOpen] = useState(false);
   const [logForm, setLogForm] = useState({
     _id: "",
@@ -664,7 +719,6 @@ export default function Employees() {
       const nl = payload?.settings?.namaz_limit;
       setConfig((c) => ({
         ...c,
-        // keep 60/40 if backend is missing; otherwise use backend
         generalIdleLimit: gl ?? 60,
         namazLimit: nl ?? 40,
         categoryColors:
@@ -728,14 +782,6 @@ export default function Employees() {
       inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start)
     );
   }
-  function uniqueDays(sessions) {
-    const set = new Set();
-    for (const s of sessions) {
-      const d = s.shiftDate || ymdInAsiaFromISO(s.idle_start);
-      if (d) set.add(d);
-    }
-    return set;
-  }
   function toH1(min) {
     return ((min || 0) / 60).toFixed(1);
   }
@@ -752,7 +798,7 @@ export default function Employees() {
     return daily * mult;
   }
   function effectiveNamazLimit(daysOverride) {
-    const daily = config.namazLimit == null ? 40 : config.namazLimit; // 40 cap by default
+    const daily = config.namazLimit == null ? 40 : config.namazLimit;
     const mult = mode === "month" ? (daysOverride == null ? getMonthDays() : daysOverride) : 1;
     return daily * mult;
   }
@@ -1004,30 +1050,20 @@ export default function Employees() {
     for (const emp of list) {
       const sessions = inScopeSessions(emp);
       const sums = calcTotals(sessions);
-      const days =
-        uniqueDays(sessions).size ||
-        new Date(parseInt(month.slice(0, 4), 10), parseInt(month.slice(5), 10), 0).getDate();
-      const shiftSpan = (() => {
-        const s = hmToMinutes(emp.shift_start);
-        const e = hmToMinutes(emp.shift_end);
-        if (s == null || e == null) return 9 * 60;
-        return e >= s ? e - s : 24 * 60 - s + e;
-      })();
-      const workMin = Math.max(0, shiftSpan * days - sums.total);
-      const gCap = effectiveGeneralLimit(days);
-      const nCap = effectiveNamazLimit(days);
+      const days = new Set(sessions.map((s) => s.shiftDate || ymdInAsiaFromISO(s.idle_start))).size || 0;
+      const gCap = (config.generalIdleLimit ?? 60) * (days || 1);
+      const nCap = (config.namazLimit ?? 40) * (days || 1);
       rows.push([
         emp.emp_id || emp.id || emp._id,
         emp.name || "-",
         emp.department || "-",
-        toH1(workMin),
         toH1(sums.general),
         toH1(sums.namaz),
         toH1(sums.official),
         toH1(sums.autobreak),
         sums.general > gCap ? "+" + toH1(sums.general - gCap) + "h" : "-",
         sums.namaz > nCap ? "+" + toH1(sums.namaz - nCap) + "h" : "-",
-        days,
+        days || new Date(parseInt(month.slice(0, 4), 10), parseInt(month.slice(5), 10), 0).getDate(),
       ]);
     }
 
@@ -1035,7 +1071,6 @@ export default function Employees() {
       "Emp ID",
       "Name",
       "Dept",
-      "Working (h)",
       "General (h)",
       "Namaz (h)",
       "Official (h)",
@@ -1176,7 +1211,7 @@ export default function Employees() {
     }
   }
 
-  /* ===== log edit/delete (admin or superadmin) ===== */
+  /* ===== log edit/delete (SUPERADMIN ONLY) ===== */
   function onEditLog(s, emp) {
     setLogForm({
       _id: s._id,
@@ -1436,12 +1471,13 @@ export default function Employees() {
                     to={to}
                     categoryColors={config.categoryColors}
                     defaultOpen={filtered.length === 1}
-                    showActions={isSuper}
+                    showActions={isSuper}             // employee card edit/delete → only superadmin
                     onEdit={openEdit}
                     onDelete={openDelete}
-                    canManageLogs={canManageLogs}
+                    canManageLogs={canManageLogs}     // log CRUD → only superadmin
                     onEditLog={onEditLog}
                     onDeleteLog={onDeleteLog}
+                    limits={{ general: config.generalIdleLimit ?? 60, namaz: config.namazLimit ?? 40 }}
                   />
                 ))}
           </TableBody>
@@ -1509,7 +1545,7 @@ export default function Employees() {
         </DialogActions>
       </Dialog>
 
-      {/* Log Edit dialog (admin/superadmin) */}
+      {/* Log Edit dialog (superadmin) */}
       <Dialog open={logEditOpen} onClose={() => setLogEditOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Edit Activity Log — {logForm.who}</DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
@@ -1585,7 +1621,7 @@ export default function Employees() {
         </DialogActions>
       </Dialog>
 
-      {/* Log Delete confirm (admin/superadmin) */}
+      {/* Log Delete confirm (superadmin) */}
       <Dialog open={logDeleteOpen} onClose={() => setLogDeleteOpen(false)}>
         <DialogTitle>Delete activity log?</DialogTitle>
         <DialogContent>
@@ -1603,4 +1639,5 @@ export default function Employees() {
     </Box>
   );
 }
+
 
