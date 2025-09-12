@@ -1,4 +1,4 @@
-// login.js
+// src/pages/Login.jsx
 import React, { useState } from "react";
 import {
   Box,
@@ -13,6 +13,7 @@ import {
 } from "@mui/material";
 import LockOutlined from "@mui/icons-material/LockOutlined";
 import api from "../api";
+import { saveAuth } from "../auth";
 
 export default function Login() {
   const [identifier, setIdentifier] = useState("");
@@ -22,6 +23,7 @@ export default function Login() {
   const [role, setRole] = useState("employee"); // "employee" | "admin"
 
   const isEmployeeMode = role === "employee";
+  // enforce exactly 6 digits for employee login
   const employeeOk = /^\d{6}$/.test(identifier);
   const adminOk = identifier.trim().length > 0 && password.trim().length > 0;
 
@@ -47,8 +49,8 @@ export default function Login() {
       const { data } = await api.post("/auth/login", payload);
       if (!data?.token || !data?.user) throw new Error("Bad response");
 
-      localStorage.setItem("token", data.token);
-      localStorage.setItem("user", JSON.stringify(data.user));
+      // store token & user centrally (axios will attach Authorization Bearer)
+      saveAuth({ token: data.token, user: data.user });
       window.location.replace("/employees");
     } catch (e2) {
       const msg = e2?.response?.data?.error || e2.message || "Login failed";
@@ -101,7 +103,7 @@ export default function Login() {
           Employee Monitor — Login
         </Typography>
 
-        {/* Segment buttons (visual like your design) */}
+        {/* Role segment buttons */}
         <ToggleButtonGroup
           exclusive
           value={role}
@@ -196,4 +198,3 @@ export default function Login() {
     </Box>
   );
 }
-
