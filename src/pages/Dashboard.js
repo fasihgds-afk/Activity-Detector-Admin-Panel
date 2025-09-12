@@ -1,6 +1,6 @@
 // src/pages/Dashboard.jsx
-// TODAY-first fetch, MUI + Recharts, role-aware exports/drilldown
-
+// TODAY-first fetch, lightweight queries, MUI + Recharts, RBAC-aware export visibility
+/* eslint-disable no-console */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Grid,
@@ -39,10 +39,11 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { FlagRounded } from "@mui/icons-material";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import api from "../api";
-import { getRole, getSelfEmpId } from "../auth";
+import { getRole } from "../auth";
 
 // ---------- small utils ----------
 const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
@@ -99,7 +100,8 @@ function useColors(theme) {
   const warnBg = alpha(theme.palette.warning.main, theme.palette.mode === "dark" ? 0.22 : 0.12);
   const badBg = alpha(theme.palette.error.main, theme.palette.mode === "dark" ? 0.24 : 0.14);
   const tableHeadGrad = `linear-gradient(90deg, ${primary}, ${secondary})`;
-  const progressTrack = theme.palette.mode === "dark" ? alpha(theme.palette.common.white, 0.16) : alpha(theme.palette.text.primary, 0.1);
+  const progressTrack =
+    theme.palette.mode === "dark" ? alpha(theme.palette.common.white, 0.16) : alpha(theme.palette.text.primary, 0.1);
   return { primary, secondary, general, namaz, official, okBg, warnBg, badBg, tableHeadGrad, progressTrack };
 }
 
@@ -108,11 +110,10 @@ export default function Dashboard() {
   const C = useColors(theme);
 
   const role = getRole();
-  const isEmployee = role === "employee";
-  const selfId = getSelfEmpId();
+  const canDownload = role === "admin" || role === "superadmin";
 
   const [employees, setEmployees] = useState([]);
-  const [limits, setLimits] = useState({ general: 60, namaz: 50 });
+  const [limits, setLimits] = useState({ general: 60, namaz: 40 }); // force 40 for Namaz cap
   const [selectedEmp, setSelectedEmp] = useState("all");
   const [openDialog, setOpenDialog] = useState(false);
   const [scope, setScope] = useState("today"); // "today" | "month"
@@ -127,17 +128,18 @@ export default function Dashboard() {
   async function fetchAll() {
     try {
       setLoading(true);
-      const params = scope === "today" ? { from: todayYmd, to: todayYmd, limit: 150 } : { from: monthStart, to: monthEnd, limit: 150 };
+      const params =
+        scope === "today" ? { from: todayYmd, to: todayYmd, limit: 150 } : { from: monthStart, to: monthEnd, limit: 150 };
       const res = await api.get("/employees", { params });
 
       const payload = Array.isArray(res.data) ? { employees: res.data } : res.data || {};
       const data = Array.isArray(payload.employees) ? payload.employees : [];
       setEmployees(data);
 
+      // Keep General from backend if present; Namaz = 40 hard cap per requirement
       const cfg = payload.settings || {};
-      const general = Number(cfg.general_idle_limit ?? limits.general ?? 60);
-      const namaz = Number(cfg.namaz_limit ?? limits.namaz ?? 50);
-      setLimits({ general, namaz });
+      const general = Number(cfg.general_idle_limit ?? 60);
+      setLimits({ general, namaz: 40 });
 
       setErr("");
       setUpdatedAt(new Date().toLocaleString("en-PK", { hour12: true }));
@@ -177,8 +179,8 @@ export default function Dashboard() {
     [scope, limits.general, daysInMonth]
   );
   const effectiveNamazLimit = useMemo(
-    () => (scope === "month" ? limits.namaz * daysInMonth : limits.namaz),
-    [scope, limits.namaz, daysInMonth]
+    () => (scope === "month" ? 40 * daysInMonth : 40), // force 40/day
+    [scope, daysInMonth]
   );
 
   const totalsToday = useMemo(() => {
@@ -264,8 +266,8 @@ export default function Dashboard() {
     const pageW = doc.internal.pageSize.getWidth();
     const limitsText =
       scope === "month"
-        ? `Limits: General ${limits.general}m/day (cap ${effectiveGeneralLimit}m), Namaz ${limits.namaz}m/day (cap ${effectiveNamazLimit}m)`
-        : `Limits: General ${limits.general}m/day, Namaz ${limits.namaz}m/day`;
+        ? `Limits: General ${limits.general}m/day (cap ${effectiveGeneralLimit}m), Namaz 40m/day (cap ${effectiveNamazLimit}m)`
+        : `Limits: General ${limits.general}m/day, Namaz 40m/day`;
 
     const header = (pageNumber) => {
       doc.setFillColor(31, 41, 55);
@@ -311,7 +313,10 @@ export default function Dashboard() {
 
   function downloadXls(filename, headers, rows) {
     const headerHtml = headers
-      .map((h) => `<th style="background:#111827;color:#fff;padding:10px 8px;border:1px solid #e5e7eb;text-align:center;font-weight:700">${h}</th>`)
+      .map(
+        (h) =>
+          `<th style="background:#111827;color:#fff;padding:10px 8px;border:1px solid #e5e7eb;text-align:center;font-weight:700">${h}</th>`
+      )
       .join("");
     const rowHtml = rows
       .map(
@@ -358,13 +363,23 @@ export default function Dashboard() {
           {loading ? (
             skeletonCard
           ) : (
-            <Card sx={{ p: 2, background: `linear-gradient(135deg, ${C.primary}, ${C.secondary})`, color: theme.palette.getContrastText(C.primary) }}>
+            <Card
+              sx={{
+                p: 2,
+                background: `linear-gradient(135deg, ${C.primary}, ${C.secondary})`,
+                color: theme.palette.getContrastText(C.primary),
+              }}
+            >
               <CardContent>
                 <Typography variant="h6">Total Employees</Typography>
                 <Typography variant="h4" fontWeight={700}>
                   {employees.length}
                 </Typography>
-                <Button variant="outlined" sx={{ mt: 1, color: "inherit", borderColor: alpha("#fff", 0.8) }} onClick={() => setOpenDialog(true)}>
+                <Button
+                  variant="outlined"
+                  sx={{ mt: 1, color: "inherit", borderColor: alpha("#fff", 0.8) }}
+                  onClick={() => setOpenDialog(true)}
+                >
                   Show All
                 </Button>
               </CardContent>
@@ -405,37 +420,34 @@ export default function Dashboard() {
             <Card sx={{ p: 2, bgcolor: C.official, color: theme.palette.getContrastText(C.official) }}>
               <CardContent>
                 <Typography variant="h6">Namaz Limit</Typography>
-                <Typography variant="h4" fontWeight={700}>{limits.namaz} m/day</Typography>
+                <Typography variant="h4" fontWeight={700}>40 m/day</Typography>
               </CardContent>
             </Card>
           )}
         </Grid>
       </Grid>
 
-      {/* Export + Scope */}
-      <Card sx={{ p: 3, mb: 4 }}>
-        <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
-          <Typography variant="h6" fontWeight={600} sx={{ mr: "auto" }}>
-            Quick Exports
-            <Typography variant="caption" sx={{ ml: 1 }} color="text.secondary">
-              Last updated: {updatedAt || "—"}
+      {/* Export + Scope (hidden for employees) */}
+      {canDownload && (
+        <Card sx={{ p: 3, mb: 4 }}>
+          <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
+            <Typography variant="h6" fontWeight={600} sx={{ mr: "auto" }}>
+              Quick Exports
+              <Typography variant="caption" sx={{ ml: 1 }} color="text.secondary">
+                Last updated: {updatedAt || "—"}
+              </Typography>
             </Typography>
-          </Typography>
 
-          <ToggleButtonGroup value={scope} exclusive onChange={(_, v) => v && setScope(v)} size="small" sx={{ mr: 1 }}>
-            <ToggleButton value="today">Today</ToggleButton>
-            <ToggleButton value="month">This Month</ToggleButton>
-          </ToggleButtonGroup>
+            <ToggleButtonGroup value={scope} exclusive onChange={(_, v) => v && setScope(v)} size="small" sx={{ mr: 1 }}>
+              <ToggleButton value="today">Today</ToggleButton>
+              <ToggleButton value="month">This Month</ToggleButton>
+            </ToggleButtonGroup>
 
-          {/* Employees cannot export */}
-          {!isEmployee && (
-            <>
-              <Button variant="contained" onClick={exportPDF}>Export PDF</Button>
-              <Button variant="outlined" onClick={exportXLS}>Export Excel</Button>
-            </>
-          )}
-        </Box>
-      </Card>
+            <Button variant="contained" onClick={exportPDF}>Export PDF</Button>
+            <Button variant="outlined" onClick={exportXLS}>Export Excel</Button>
+          </Box>
+        </Card>
+      )}
 
       {/* Pie (today) */}
       <Card sx={{ p: 3, mb: 4 }}>
@@ -443,16 +455,11 @@ export default function Dashboard() {
           <Typography variant="h6" fontWeight={600}>Break Usage Summary (Today)</Typography>
           <Select size="small" value={selectedEmp} onChange={(e) => setSelectedEmp(e.target.value)}>
             <MenuItem value="all">All Employees</MenuItem>
-            {/* Employees can only choose themselves */}
-            {isEmployee ? (
-              <MenuItem value="me">Me</MenuItem>
-            ) : (
-              employees.map((emp) => (
-                <MenuItem key={emp.id || emp.emp_id || emp._id} value={emp.id || emp.emp_id || emp._id}>
-                  {emp.name}
-                </MenuItem>
-              ))
-            )}
+            {employees.map((emp) => (
+              <MenuItem key={emp.id || emp.emp_id || emp._id} value={emp.id || emp.emp_id || emp._id}>
+                {emp.name}
+              </MenuItem>
+            ))}
           </Select>
         </Box>
         <Divider sx={{ my: 2 }} />
@@ -463,8 +470,7 @@ export default function Dashboard() {
                 selectedEmp === "all"
                   ? donutData
                   : (() => {
-                      const targetId = selectedEmp === "me" ? selfId : selectedEmp;
-                      const emp = employees.find((e) => (e.id || e.emp_id || e._id) === targetId);
+                      const emp = employees.find((e) => (e.id || e.emp_id || e._id) === selectedEmp);
                       const ses = (emp?.idle_sessions || []).filter((s) => ymdOf(s) === todayYmd);
                       const agg = (c) => ses.reduce((a, s) => a + (s.category === c ? (s.duration || 0) : 0), 0);
                       return [
@@ -499,7 +505,9 @@ export default function Dashboard() {
           <BarChart
             data={employees.map((emp) => {
               const ses = (emp.idle_sessions || []).filter((s) => ymdOf(s) === todayYmd);
-              let g = 0, n = 0, o = 0;
+              let g = 0,
+                n = 0,
+                o = 0;
               for (const s of ses) {
                 const d = Number(s.duration) || 0;
                 if (s.category === "General") g += d;
@@ -552,37 +560,62 @@ export default function Dashboard() {
                 const bg = r.status === "Exceeded" ? C.badBg : r.status === "Near Limit" ? C.warnBg : C.okBg;
                 const capG = effectiveGeneralLimit;
                 const capN = effectiveNamazLimit;
-                const pctBar = (value, cap, color) => (
-                  <Box sx={{ minWidth: 140 }}>
-                    <Tooltip title={`${value} / ${cap} min`}>
-                      <LinearProgress
-                        variant="determinate"
-                        value={cap ? Math.min(100, (value / cap) * 100) : 0}
-                        sx={{
-                          height: 8,
-                          borderRadius: 6,
-                          backgroundColor: C.progressTrack,
-                          "& .MuiLinearProgress-bar": { backgroundColor: color },
-                        }}
-                      />
-                    </Tooltip>
-                    <Typography variant="caption" sx={{ display: "block", mt: 0.5 }}>
-                      {value} m
-                    </Typography>
+                const exceedG = capG ? r.general > capG : false;
+                const exceedN = capN ? r.namaz > capN : false;
+
+                const pctBar = (value, cap, baseColor, exceeded) => (
+                  <Box sx={{ minWidth: 160, display: "flex", alignItems: "center", gap: 1 }}>
+                    <Box sx={{ flex: 1 }}>
+                      <Tooltip title={`${value} / ${cap} min`}>
+                        <LinearProgress
+                          variant="determinate"
+                          value={cap ? Math.min(100, (value / cap) * 100) : 0}
+                          sx={{
+                            height: 8,
+                            borderRadius: 6,
+                            backgroundColor: C.progressTrack,
+                            "& .MuiLinearProgress-bar": {
+                              backgroundColor: exceeded ? theme.palette.error.main : baseColor,
+                            },
+                          }}
+                        />
+                      </Tooltip>
+                      <Typography
+                        variant="caption"
+                        sx={{ display: "block", mt: 0.5, fontWeight: 700, color: exceeded ? "error.main" : "text.secondary" }}
+                      >
+                        {value} m
+                      </Typography>
+                    </Box>
+                    {exceeded && <FlagRounded fontSize="small" sx={{ color: "error.main" }} />}
                   </Box>
                 );
                 const medal = r.rank === 1 ? "🥇" : r.rank === 2 ? "🥈" : r.rank === 3 ? "🥉" : r.rank;
+
                 return (
-                  <tr key={r.id} style={{ background: bg, borderBottom: `1px solid ${alpha(theme.palette.divider, 0.6)}`, color: theme.palette.text.primary }}>
+                  <tr
+                    key={r.id}
+                    style={{
+                      background: bg,
+                      borderBottom: `1px solid ${alpha(theme.palette.divider, 0.6)}`,
+                      color: theme.palette.text.primary,
+                    }}
+                  >
                     <td style={{ padding: 10, fontWeight: 700 }}>{medal}</td>
                     <td style={{ padding: 10 }}>{r.name}</td>
                     <td style={{ padding: 10 }}>{r.department}</td>
-                    <td style={{ padding: 10, textAlign: "center" }}>{pctBar(r.general, capG, C.general)}</td>
-                    <td style={{ padding: 10, textAlign: "center" }}>{pctBar(r.namaz, capN, C.namaz)}</td>
+                    <td style={{ padding: 10, textAlign: "center" }}>{pctBar(r.general, capG, C.general, exceedG)}</td>
+                    <td style={{ padding: 10, textAlign: "center" }}>{pctBar(r.namaz, capN, C.namaz, exceedN)}</td>
                     <td style={{ padding: 10, fontWeight: 600, textAlign: "center" }}>{r.official} m</td>
                     <td style={{ padding: 10, fontWeight: 700, textAlign: "center" }}>{r.total} m</td>
                     <td style={{ padding: 10, textAlign: "center" }}>
-                      <Chip label={r.status} color={r.color} variant={r.status === "Obedient" ? "filled" : "outlined"} sx={{ fontWeight: 700 }} />
+                      <Chip
+                        label={r.status}
+                        color={r.color}
+                        icon={r.status === "Exceeded" ? <FlagRounded /> : undefined}
+                        variant={r.status === "Obedient" ? "filled" : "outlined"}
+                        sx={{ fontWeight: 700 }}
+                      />
                     </td>
                   </tr>
                 );
@@ -608,3 +641,4 @@ export default function Dashboard() {
     </Box>
   );
 }
+
