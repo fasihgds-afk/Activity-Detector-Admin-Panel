@@ -43,7 +43,7 @@ import {
 } from "@mui/icons-material";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import api from "../api"; // ✅ unified axios instance (adds Bearer token)
+import api from "../api";                    // ✅ axios instance (adds Bearer)
 import { getRole, getSelfEmpId } from "../auth";
 
 const ZONE = "Asia/Karachi";
@@ -211,6 +211,17 @@ function summarizeReasonsByCategory(sessions) {
   return parts.length ? parts.join(" • ") : "-";
 }
 
+/* ---------- helpers for editing times (Karachi → UTC ISO) ---------- */
+function isoFromKarachi(ymd /* YYYY-MM-DD */, hhmm /* HH:mm */) {
+  if (!ymd || !hhmm) return null;
+  const [Y, M, D] = ymd.split("-").map(Number);
+  const [H, Min] = hhmm.split(":").map(Number);
+  // Karachi is UTC+5 (no DST) → UTC hour = H - 5
+  const dt = new Date(Date.UTC(Y, M - 1, D, H - 5, Min || 0, 0));
+  return dt.toISOString();
+}
+
+/* ---------- Row component ---------- */
 function EmployeeRow({
   emp,
   dayMode,
@@ -222,6 +233,9 @@ function EmployeeRow({
   showActions = false,
   onEdit,
   onDelete,
+  canManageLogs = false,
+  onEditLog,
+  onDeleteLog,
 }) {
   const theme = useTheme();
   const [open, setOpen] = useState(Boolean(defaultOpen));
@@ -352,6 +366,7 @@ function EmployeeRow({
                             <TableCell>End Time</TableCell>
                             <TableCell>Reason</TableCell>
                             <TableCell>Duration (min)</TableCell>
+                            {canManageLogs && <TableCell align="right">Actions</TableCell>}
                           </TableRow>
                         </TableHead>
                         <TableBody>
@@ -397,6 +412,29 @@ function EmployeeRow({
                                 <TableCell>
                                   {isAuto ? Number(s.duration || 0).toFixed(1) + " min" : (s.duration || 0) + " min"}
                                 </TableCell>
+
+                                {canManageLogs && (
+                                  <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
+                                    {!isAuto && (
+                                      <>
+                                        <Tooltip title="Edit log">
+                                          <IconButton size="small" onClick={() => onEditLog(s, emp)}>
+                                            <EditOutlined fontSize="small" />
+                                          </IconButton>
+                                        </Tooltip>
+                                        <Tooltip title="Delete log">
+                                          <IconButton
+                                            size="small"
+                                            color="error"
+                                            onClick={() => onDeleteLog(s, emp)}
+                                          >
+                                            <DeleteOutline fontSize="small" />
+                                          </IconButton>
+                                        </Tooltip>
+                                      </>
+                                    )}
+                                  </TableCell>
+                                )}
                               </TableRow>
                             );
                           })}
@@ -496,6 +534,7 @@ export default function Employees() {
   const isEmployee = role === "employee";
   const isSuper = role === "superadmin";
   const canDownload = role === "admin" || role === "superadmin";
+  const canManageLogs = role === "admin" || role === "superadmin";
 
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
@@ -522,12 +561,28 @@ export default function Employees() {
   const [anchorEl, setAnchorEl] = useState(null);
   const openMenu = Boolean(anchorEl);
 
-  // 🔧 Edit/Delete state (superadmin)
+  // employee edit/delete
   const [editOpen, setEditOpen] = useState(false);
   const [editEmp, setEditEmp] = useState(null);
   const [editForm, setEditForm] = useState({ name: "", department: "", shift_start: "", shift_end: "" });
   const [deleteOpen, setDeleteOpen] = useState(false);
+
+  // log edit/delete
+  const [logEditOpen, setLogEditOpen] = useState(false);
+  const [logForm, setLogForm] = useState({
+    _id: "",
+    who: "",
+    dateYmd: "",
+    startHM: "",
+    endHM: "",
+    reason: "",
+    category: "General",
+    status: "Idle",
+  });
+  const [logDeleteOpen, setLogDeleteOpen] = useState(false);
+
   const [busyAction, setBusyAction] = useState(false);
+  const abortRef = useRef(null);
 
   useEffect(() => {
     if (isEmployee) setEmployeeFilter(getSelfEmpId() || "all");
@@ -555,8 +610,6 @@ export default function Employees() {
     }
     return list;
   }, [employees, employeeFilter, search]);
-
-  const abortRef = useRef(null);
 
   const fetchEmployees = async () => {
     try {
@@ -692,6 +745,7 @@ export default function Employees() {
     return rows;
   }
 
+  /* ===== PDF / Excel exporters (unchanged) ===== */
   function downloadPDFDailySummaryAll() {
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
     const pageW = doc.internal.pageSize.getWidth();
@@ -804,7 +858,7 @@ export default function Employees() {
     ]);
 
     autoTable(doc, {
-      head: [["Category", "Start Time", "End Time", "Reason", "Duration (min)"]]],
+      head: [["Category", "Start Time", "End Time", "Reason", "Duration (min)"]],
       body,
       startY: 120,
       margin: { left: 40, right: 40 },
@@ -1012,7 +1066,7 @@ export default function Employees() {
     return downloadPDFDailySummaryAll();
   }
 
-  // ===== superadmin edit/delete =====
+  /* ===== employee edit/delete (superadmin) ===== */
   function openEdit(emp) {
     setEditEmp(emp);
     setEditForm({
@@ -1059,6 +1113,68 @@ export default function Employees() {
     } finally {
       setBusyAction(false);
     }
+  }
+
+  /* ===== log edit/delete (admin or superadmin) ===== */
+  function onEditLog(s, emp) {
+    setLogForm({
+      _id: s._id,
+      who: emp?.name || "",
+      dateYmd: s.shiftDate || ymdInAsiaFromISO(s.idle_start) || day,
+      startHM: (s.start_time_local || "").slice(0, 5),
+      endHM: s.end_time_local && s.end_time_local !== "Ongoing" ? s.end_time_local.slice(0, 5) : "",
+      reason: s.reason || "",
+      category: s.category || "General",
+      status: "Idle",
+    });
+    setLogEditOpen(true);
+  }
+  function onDeleteLog(s /*, emp*/) {
+    setLogForm((f) => ({ ...f, _id: s._id }));
+    setLogDeleteOpen(true);
+  }
+
+  async function saveLogEdit() {
+    setBusyAction(true);
+    try {
+      const payload = {
+        reason: logForm.reason,
+        category: logForm.category,
+        status: logForm.status,
+      };
+      if (logForm.startHM) payload.idle_start = isoFromKarachi(logForm.dateYmd, logForm.startHM);
+      if (logForm.endHM === "") payload.idle_end = null; // clear end
+      else if (logForm.endHM) payload.idle_end = isoFromKarachi(logForm.dateYmd, logForm.endHM);
+
+      await api.put(`/activities/${logForm._id}`, payload);
+      setLogEditOpen(false);
+      await fetchEmployees();
+    } catch (e) {
+      alert(e?.response?.data?.error || e.message || "Failed to update activity log");
+    } finally {
+      setBusyAction(false);
+    }
+  }
+
+  async function doLogDelete() {
+    setBusyAction(true);
+    try {
+      await api.delete(`/activities/${logForm._id}`);
+      setLogDeleteOpen(false);
+      await fetchEmployees();
+    } catch (e) {
+      alert(e?.response?.data?.error || e.message || "Failed to delete activity log");
+    } finally {
+      setBusyAction(false);
+    }
+  }
+
+  function endLogNow() {
+    const { h, m } = karachiNowHM();
+    setLogForm((f) => ({ ...f, endHM: `${pad(h)}:${pad(m)}` }));
+  }
+  function clearEndTime() {
+    setLogForm((f) => ({ ...f, endHM: "" }));
   }
 
   const headerGradient =
@@ -1262,13 +1378,16 @@ export default function Employees() {
                     showActions={isSuper}
                     onEdit={openEdit}
                     onDelete={openDelete}
+                    canManageLogs={canManageLogs}
+                    onEditLog={onEditLog}
+                    onDeleteLog={onDeleteLog}
                   />
                 ))}
           </TableBody>
         </Table>
       </TableContainer>
 
-      {/* Edit dialog */}
+      {/* Employee Edit dialog */}
       <Dialog open={editOpen} onClose={() => setEditOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Edit Employee</DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
@@ -1311,7 +1430,7 @@ export default function Employees() {
         </DialogActions>
       </Dialog>
 
-      {/* Delete confirm */}
+      {/* Employee Delete confirm */}
       <Dialog open={deleteOpen} onClose={() => setDeleteOpen(false)}>
         <DialogTitle>Delete employee?</DialogTitle>
         <DialogContent>
@@ -1328,7 +1447,100 @@ export default function Employees() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Log Edit dialog (admin / superadmin) */}
+      <Dialog open={logEditOpen} onClose={() => setLogEditOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Edit Activity Log — {logForm.who}</DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          <Box display="flex" gap={2}>
+            <TextField
+              label="Date (Karachi)"
+              type="date"
+              value={logForm.dateYmd}
+              onChange={(e) => setLogForm((f) => ({ ...f, dateYmd: e.target.value }))}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+            <TextField
+              label="Start (HH:mm)"
+              type="time"
+              value={logForm.startHM}
+              onChange={(e) => setLogForm((f) => ({ ...f, startHM: e.target.value }))}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+            <TextField
+              label="End (HH:mm)"
+              type="time"
+              value={logForm.endHM}
+              onChange={(e) => setLogForm((f) => ({ ...f, endHM: e.target.value }))}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+          </Box>
+
+          <Box display="flex" gap={2} mt={2}>
+            <Select
+              fullWidth
+              value={logForm.category}
+              onChange={(e) => setLogForm((f) => ({ ...f, category: e.target.value }))}
+            >
+              <MenuItem value="General">General</MenuItem>
+              <MenuItem value="Official">Official</MenuItem>
+              <MenuItem value="Namaz">Namaz</MenuItem>
+            </Select>
+            <Select
+              fullWidth
+              value={logForm.status}
+              onChange={(e) => setLogForm((f) => ({ ...f, status: e.target.value }))}
+            >
+              <MenuItem value="Idle">Idle</MenuItem>
+              <MenuItem value="Active">Active</MenuItem>
+            </Select>
+          </Box>
+
+          <TextField
+            label="Reason"
+            value={logForm.reason}
+            onChange={(e) => setLogForm((f) => ({ ...f, reason: e.target.value }))}
+            fullWidth
+            margin="dense"
+            multiline
+            minRows={2}
+          />
+
+          <Box mt={1} display="flex" gap={1}>
+            <Button size="small" onClick={endLogNow}>End Now</Button>
+            <Button size="small" onClick={clearEndTime}>Clear End</Button>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button startIcon={<Close />} onClick={() => setLogEditOpen(false)} disabled={busyAction}>
+            Cancel
+          </Button>
+          <Button startIcon={<Save />} variant="contained" onClick={saveLogEdit} disabled={busyAction}>
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Log Delete confirm */}
+      <Dialog open={logDeleteOpen} onClose={() => setLogDeleteOpen(false)}>
+        <DialogTitle>Delete activity log?</DialogTitle>
+        <DialogContent>
+          <Typography>Are you sure you want to delete this activity log?</Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setLogDeleteOpen(false)} disabled={busyAction}>
+            Cancel
+          </Button>
+          <Button color="error" variant="contained" onClick={doLogDelete} disabled={busyAction}>
+            Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
+
 
