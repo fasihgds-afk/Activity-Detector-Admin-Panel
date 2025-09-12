@@ -1,12 +1,5 @@
-
-
-
-
-
-
-
-/* eslint-disable no-console */
 // src/pages/Employees.jsx
+/* eslint-disable no-console */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Paper,
@@ -167,12 +160,20 @@ function computeDbAwareStatus(emp, ctx) {
   if (raw === "active" || raw === "online" || raw === "working") return { label: "Active", color: "success" };
   if (raw === "idle") {
     if (onCat) {
-      const color = onCat === "Official" ? "info" : onCat === "Namaz" ? "success" : onCat === "AutoBreak" ? "error" : "warning";
+      const color =
+        onCat === "Official"
+          ? "info"
+          : onCat === "Namaz"
+          ? "success"
+          : onCat === "AutoBreak"
+          ? "error"
+          : "warning";
       return { label: "On Break — " + onCat, color };
     }
     return null;
   }
-  if (raw === "break" || raw === "on break" || raw === "paused") return { label: onCat ? "On Break — " + onCat : "On Break", color: "warning" };
+  if (raw === "break" || raw === "on break" || raw === "paused")
+    return { label: onCat ? "On Break — " + onCat : "On Break", color: "warning" };
   if (raw === "offline") return { label: "Offline", color: "default" };
   if (raw === "unknown" || !raw) return null;
   return { label: emp.latest_status, color: "default" };
@@ -196,7 +197,7 @@ function summarizeReasonsByCategory(sessions) {
   const OTHER = "Other";
   const buckets = new Map(ORDER.map((c) => [c, []]));
   const seenPerCat = new Map(ORDER.map((c) => [c, new Set()]));
-  if (!buckets.has(OTHER)) buckets.set(OTHER, []);
+  if (!buckets.has(OTHER)) buckets.set(OTHER, []); // shouldn't happen
   if (!seenPerCat.has(OTHER)) seenPerCat.set(OTHER, new Set());
   for (const s of sessions) {
     const cat = ORDER.indexOf(s && s.category) >= 0 ? s.category : OTHER;
@@ -219,12 +220,12 @@ function summarizeReasonsByCategory(sessions) {
   return parts.length ? parts.join(" • ") : "-";
 }
 
-/* ---------- helpers for editing times (Karachi → UTC ISO) ---------- */
+/* ---------- Karachi → UTC helper ---------- */
 function isoFromKarachi(ymd /* YYYY-MM-DD */, hhmm /* HH:mm */) {
   if (!ymd || !hhmm) return null;
   const [Y, M, D] = ymd.split("-").map(Number);
   const [H, Min] = hhmm.split(":").map(Number);
-  // Karachi is UTC+5 (no DST) → UTC hour = H - 5
+  // Karachi UTC+5
   const dt = new Date(Date.UTC(Y, M - 1, D, H - 5, Min || 0, 0));
   return dt.toISOString();
 }
@@ -310,7 +311,9 @@ function EmployeeRow({
         </TableCell>
         <TableCell align="center">
           <Tooltip title="Show Sessions">
-            <IconButton onClick={() => setOpen((x) => !x)}>{open ? <KeyboardArrowUp /> : <KeyboardArrowDown />}</IconButton>
+            <IconButton onClick={() => setOpen((x) => !x)}>
+              {open ? <KeyboardArrowUp /> : <KeyboardArrowDown />}
+            </IconButton>
           </Tooltip>
         </TableCell>
 
@@ -418,7 +421,9 @@ function EmployeeRow({
                                   {s.reason || (isAuto ? "System Power Off / Startup" : "-")}
                                 </TableCell>
                                 <TableCell>
-                                  {isAuto ? Number(s.duration || 0).toFixed(1) + " min" : (s.duration || 0) + " min"}
+                                  {isAuto
+                                    ? Number(s.duration || 0).toFixed(1) + " min"
+                                    : (s.duration || 0) + " min"}
                                 </TableCell>
 
                                 {canManageLogs && (
@@ -549,10 +554,16 @@ export default function Employees() {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
 
+  // Defaults: 60 / 40 caps on frontend
   const [config, setConfig] = useState({
     generalIdleLimit: 60,
-    namazLimit: 50,
-    categoryColors: { Official: "#3b82f6", General: "#f59e0b", Namaz: "#10b981", AutoBreak: "#ef4444" },
+    namazLimit: 40,
+    categoryColors: {
+      Official: "#3b82f6",
+      General: "#f59e0b",
+      Namaz: "#10b981",
+      AutoBreak: "#ef4444",
+    },
   });
 
   const [employeeFilter, setEmployeeFilter] = useState("all");
@@ -569,13 +580,18 @@ export default function Employees() {
   const [anchorEl, setAnchorEl] = useState(null);
   const openMenu = Boolean(anchorEl);
 
-  // employee edit/delete
+  // employee edit/delete (super)
   const [editOpen, setEditOpen] = useState(false);
   const [editEmp, setEditEmp] = useState(null);
-  const [editForm, setEditForm] = useState({ name: "", department: "", shift_start: "", shift_end: "" });
+  const [editForm, setEditForm] = useState({
+    name: "",
+    department: "",
+    shift_start: "",
+    shift_end: "",
+  });
   const [deleteOpen, setDeleteOpen] = useState(false);
 
-  // log edit/delete
+  // log edit/delete (admin/super)
   const [logEditOpen, setLogEditOpen] = useState(false);
   const [logForm, setLogForm] = useState({
     _id: "",
@@ -648,11 +664,17 @@ export default function Employees() {
       const nl = payload?.settings?.namaz_limit;
       setConfig((c) => ({
         ...c,
-        generalIdleLimit: gl ?? c.generalIdleLimit,
-        namazLimit: nl ?? c.namazLimit,
+        // keep 60/40 if backend is missing; otherwise use backend
+        generalIdleLimit: gl ?? 60,
+        namazLimit: nl ?? 40,
         categoryColors:
           payload?.categoryColors ||
-          c.categoryColors || { Official: "#3b82f6", General: "#f59e0b", Namaz: "#10b981", AutoBreak: "#ef4444" },
+          c.categoryColors || {
+            Official: "#3b82f6",
+            General: "#f59e0b",
+            Namaz: "#10b981",
+            AutoBreak: "#ef4444",
+          },
       }));
     } catch (e) {
       if (e.code !== "ERR_CANCELED") {
@@ -702,7 +724,9 @@ export default function Employees() {
     return window.confirm("Download " + label + "?");
   }
   function inScopeSessions(emp) {
-    return (emp.idle_sessions || []).filter((s) => inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start));
+    return (emp.idle_sessions || []).filter((s) =>
+      inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start)
+    );
   }
   function uniqueDays(sessions) {
     const set = new Set();
@@ -728,7 +752,7 @@ export default function Employees() {
     return daily * mult;
   }
   function effectiveNamazLimit(daysOverride) {
-    const daily = config.namazLimit == null ? 50 : config.namazLimit;
+    const daily = config.namazLimit == null ? 40 : config.namazLimit; // 40 cap by default
     const mult = mode === "month" ? (daysOverride == null ? getMonthDays() : daysOverride) : 1;
     return daily * mult;
   }
@@ -760,9 +784,14 @@ export default function Employees() {
     const brand = [31, 41, 55];
     const accent = [99, 102, 241];
     const label = mode === "day" ? day : from + " → " + to;
-    const title = mode === "day" ? "Daily Idle Report" : mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report";
+    const title =
+      mode === "day"
+        ? "Daily Idle Report"
+        : mode === "month"
+        ? "Monthly Idle Report"
+        : "Custom Range Idle Report";
     const gDaily = config.generalIdleLimit == null ? 60 : config.generalIdleLimit;
-    const nDaily = config.namazLimit == null ? 50 : config.namazLimit;
+    const nDaily = config.namazLimit == null ? 40 : config.namazLimit;
     const gCap = effectiveGeneralLimit();
     const nCap = effectiveNamazLimit();
     const limitsText =
@@ -781,7 +810,9 @@ export default function Employees() {
       doc.setFontSize(12);
       doc.text(title, 40, 46);
       doc.setFontSize(10);
-      doc.text("Range: " + label + " | TZ: " + ZONE + " | " + limitsText, pageW - 40, 26, { align: "right" });
+      doc.text("Range: " + label + " | TZ: " + ZONE + " | " + limitsText, pageW - 40, 26, {
+        align: "right",
+      });
     };
 
     const body = collectReportRowsWithReasons();
@@ -802,8 +833,19 @@ export default function Employees() {
       body,
       margin: { left: 28, right: 28, top: 70, bottom: 28 },
       tableWidth: "auto",
-      styles: { fontSize: 9, cellPadding: { top: 4, right: 4, bottom: 4, left: 4 }, halign: "center", valign: "middle" },
-      headStyles: { fillColor: accent, textColor: 255, halign: "center", fontStyle: "bold", overflow: "linebreak" },
+      styles: {
+        fontSize: 9,
+        cellPadding: { top: 4, right: 4, bottom: 4, left: 4 },
+        halign: "center",
+        valign: "middle",
+      },
+      headStyles: {
+        fillColor: accent,
+        textColor: 255,
+        halign: "center",
+        fontStyle: "bold",
+        overflow: "linebreak",
+      },
       theme: "striped",
       striped: true,
       alternateRowStyles: { fillColor: [248, 250, 252] },
@@ -829,7 +871,9 @@ export default function Employees() {
     if (employeeFilter === "all" || !filtered.length || mode !== "day") return;
     const emp = filtered[0];
     const empName = cleanName(emp.name);
-    const sessions = inScopeSessions(emp).sort((a, b) => new Date(a.idle_start || 0) - new Date(b.idle_start || 0));
+    const sessions = inScopeSessions(emp).sort(
+      (a, b) => new Date(a.idle_start || 0) - new Date(b.idle_start || 0)
+    );
     const sums = calcTotals(sessions);
 
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
@@ -845,7 +889,16 @@ export default function Employees() {
     doc.setFont("helvetica", "normal");
     doc.setFontSize(11);
     doc.text(
-      "Dept: " + (emp.department || "-") + " Shift: " + emp.shift_start + " – " + emp.shift_end + " Day: " + day + " TZ: " + ZONE,
+      "Dept: " +
+        (emp.department || "-") +
+        " Shift: " +
+        emp.shift_start +
+        " – " +
+        emp.shift_end +
+        " Day: " +
+        day +
+        " TZ: " +
+        ZONE,
       40,
       46
     );
@@ -937,7 +990,7 @@ export default function Employees() {
           " | Caps/day: General " +
           (config.generalIdleLimit ?? 60) +
           "m, Namaz " +
-          (config.namazLimit ?? 50) +
+          (config.namazLimit ?? 40) +
           "m | TZ: " +
           ZONE,
         40,
@@ -1215,7 +1268,7 @@ export default function Employees() {
         <Select
           size="small"
           value={employeeFilter}
-          disabled={isEmployee} // employees cannot switch to others
+          disabled={isEmployee} // employee cannot change (locked to self)
           onChange={(e) => setEmployeeFilter(e.target.value)}
           sx={{ minWidth: 200 }}
         >
@@ -1343,7 +1396,7 @@ export default function Employees() {
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
         {mode === "day" ? "Range: " + day : "Range: " + from + " → " + to} &nbsp; | &nbsp;
         {employeeFilter !== "all" ? "Employee: " + selectedName : "All Employees"} &nbsp; | &nbsp;
-        General: {config.generalIdleLimit ?? 60}m/day • Namaz: {config.namazLimit ?? 50}m/day &nbsp; | &nbsp; TZ: {ZONE}
+        General: {config.generalIdleLimit ?? 60}m/day • Namaz: {config.namazLimit ?? 40}m/day &nbsp; | &nbsp; TZ: {ZONE}
       </Typography>
 
       {err && (
@@ -1395,7 +1448,7 @@ export default function Employees() {
         </Table>
       </TableContainer>
 
-      {/* Employee Edit dialog */}
+      {/* Employee Edit dialog (superadmin) */}
       <Dialog open={editOpen} onClose={() => setEditOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Edit Employee</DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
@@ -1438,7 +1491,7 @@ export default function Employees() {
         </DialogActions>
       </Dialog>
 
-      {/* Employee Delete confirm */}
+      {/* Employee Delete confirm (superadmin) */}
       <Dialog open={deleteOpen} onClose={() => setDeleteOpen(false)}>
         <DialogTitle>Delete employee?</DialogTitle>
         <DialogContent>
@@ -1456,7 +1509,7 @@ export default function Employees() {
         </DialogActions>
       </Dialog>
 
-      {/* Log Edit dialog (admin / superadmin) */}
+      {/* Log Edit dialog (admin/superadmin) */}
       <Dialog open={logEditOpen} onClose={() => setLogEditOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Edit Activity Log — {logForm.who}</DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
@@ -1532,7 +1585,7 @@ export default function Employees() {
         </DialogActions>
       </Dialog>
 
-      {/* Log Delete confirm */}
+      {/* Log Delete confirm (admin/superadmin) */}
       <Dialog open={logDeleteOpen} onClose={() => setLogDeleteOpen(false)}>
         <DialogTitle>Delete activity log?</DialogTitle>
         <DialogContent>
@@ -1550,3 +1603,4 @@ export default function Employees() {
     </Box>
   );
 }
+
