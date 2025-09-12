@@ -1,4 +1,12 @@
+
+
+
+
+
+
+
 /* eslint-disable no-console */
+// src/pages/Employees.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Paper,
@@ -43,7 +51,7 @@ import {
 } from "@mui/icons-material";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import api from "../api";                    // ✅ axios instance (adds Bearer)
+import api from "../api";
 import { getRole, getSelfEmpId } from "../auth";
 
 const ZONE = "Asia/Karachi";
@@ -745,7 +753,7 @@ export default function Employees() {
     return rows;
   }
 
-  /* ===== PDF / Excel exporters (unchanged) ===== */
+  /* ===== PDF / Excel exporters ===== */
   function downloadPDFDailySummaryAll() {
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
     const pageW = doc.internal.pageSize.getWidth();
@@ -1207,7 +1215,7 @@ export default function Employees() {
         <Select
           size="small"
           value={employeeFilter}
-          disabled={isEmployee}
+          disabled={isEmployee} // employees cannot switch to others
           onChange={(e) => setEmployeeFilter(e.target.value)}
           sx={{ minWidth: 200 }}
         >
@@ -1542,9 +1550,3 @@ export default function Employees() {
     </Box>
   );
 }
-
-
-
-
-
-
