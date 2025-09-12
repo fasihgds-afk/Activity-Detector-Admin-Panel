@@ -27,6 +27,8 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
+  FormControl,
+  InputLabel,
   Alert,
   Skeleton,
 } from "@mui/material";
@@ -36,14 +38,13 @@ import {
   KeyboardArrowUp,
   AccessTime,
   Download,
-  EditOutlined,
-  DeleteOutline,
-  Close,
-  Save,
+  Edit,
+  Delete,
+  StopCircle,
 } from "@mui/icons-material";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import api from "../api";                    // ✅ axios instance (adds Bearer)
+import api from "../api"; // ✅ unified axios instance (adds Bearer token)
 import { getRole, getSelfEmpId } from "../auth";
 
 const ZONE = "Asia/Karachi";
@@ -159,12 +160,14 @@ function computeDbAwareStatus(emp, ctx) {
   if (raw === "active" || raw === "online" || raw === "working") return { label: "Active", color: "success" };
   if (raw === "idle") {
     if (onCat) {
-      const color = onCat === "Official" ? "info" : onCat === "Namaz" ? "success" : onCat === "AutoBreak" ? "error" : "warning";
+      const color =
+        onCat === "Official" ? "info" : onCat === "Namaz" ? "success" : onCat === "AutoBreak" ? "error" : "warning";
       return { label: "On Break — " + onCat, color };
     }
     return null;
   }
-  if (raw === "break" || raw === "on break" || raw === "paused") return { label: onCat ? "On Break — " + onCat : "On Break", color: "warning" };
+  if (raw === "break" || raw === "on break" || raw === "paused")
+    return { label: onCat ? "On Break — " + onCat : "On Break", color: "warning" };
   if (raw === "offline") return { label: "Offline", color: "default" };
   if (raw === "unknown" || !raw) return null;
   return { label: emp.latest_status, color: "default" };
@@ -211,17 +214,6 @@ function summarizeReasonsByCategory(sessions) {
   return parts.length ? parts.join(" • ") : "-";
 }
 
-/* ---------- helpers for editing times (Karachi → UTC ISO) ---------- */
-function isoFromKarachi(ymd /* YYYY-MM-DD */, hhmm /* HH:mm */) {
-  if (!ymd || !hhmm) return null;
-  const [Y, M, D] = ymd.split("-").map(Number);
-  const [H, Min] = hhmm.split(":").map(Number);
-  // Karachi is UTC+5 (no DST) → UTC hour = H - 5
-  const dt = new Date(Date.UTC(Y, M - 1, D, H - 5, Min || 0, 0));
-  return dt.toISOString();
-}
-
-/* ---------- Row component ---------- */
 function EmployeeRow({
   emp,
   dayMode,
@@ -230,15 +222,18 @@ function EmployeeRow({
   to,
   categoryColors,
   defaultOpen = false,
-  showActions = false,
-  onEdit,
-  onDelete,
-  canManageLogs = false,
-  onEditLog,
-  onDeleteLog,
+  canManage = false,
+  onChanged = () => {},
 }) {
   const theme = useTheme();
   const [open, setOpen] = useState(Boolean(defaultOpen));
+
+  // === edit dialog state ===
+  const [editOpen, setEditOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState(null);
+  const [editReason, setEditReason] = useState("");
+  const [editCategory, setEditCategory] = useState("");
+
   const all = Array.isArray(emp && emp.idle_sessions) ? emp.idle_sessions : [];
 
   const grouped = useMemo(() => {
@@ -271,6 +266,47 @@ function EmployeeRow({
 
   const trackBorder = alpha(theme.palette.divider, 0.4);
   const cardBase = (col, opLight = 0.12, opDark = 0.18) => alpha(col, theme.palette.mode === "dark" ? opDark : opLight);
+
+  // --- actions ---
+  const startEdit = (s) => {
+    setEditTarget(s);
+    setEditReason(s?.reason || "");
+    setEditCategory(s?.category || "");
+    setEditOpen(true);
+  };
+  const saveEdit = async () => {
+    if (!editTarget?._id) return setEditOpen(false);
+    try {
+      await api.put(`/activities/${editTarget._id}`, {
+        reason: editReason,
+        category: editCategory || undefined,
+      });
+      setEditOpen(false);
+      onChanged();
+    } catch (e) {
+      alert(e?.response?.data?.error || "Failed to update log");
+    }
+  };
+  const endNow = async (s) => {
+    if (!s?._id) return;
+    if (!window.confirm("End this idle session now?")) return;
+    try {
+      await api.put(`/activities/${s._id}/end`);
+      onChanged();
+    } catch (e) {
+      alert(e?.response?.data?.error || "Failed to close log");
+    }
+  };
+  const deleteLog = async (s) => {
+    if (!s?._id) return;
+    if (!window.confirm("Delete this activity log? This cannot be undone.")) return;
+    try {
+      await api.delete(`/activities/${s._id}`);
+      onChanged();
+    } catch (e) {
+      alert(e?.response?.data?.error || "Failed to delete log");
+    }
+  };
 
   return (
     <>
@@ -305,25 +341,9 @@ function EmployeeRow({
             <IconButton onClick={() => setOpen((x) => !x)}>{open ? <KeyboardArrowUp /> : <KeyboardArrowDown />}</IconButton>
           </Tooltip>
         </TableCell>
-
-        {showActions && (
-          <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
-            <Tooltip title="Edit employee">
-              <IconButton onClick={() => onEdit(emp)} size="small">
-                <EditOutlined />
-              </IconButton>
-            </Tooltip>
-            <Tooltip title="Delete employee">
-              <IconButton onClick={() => onDelete(emp)} size="small" color="error">
-                <DeleteOutline />
-              </IconButton>
-            </Tooltip>
-          </TableCell>
-        )}
       </TableRow>
-
       <TableRow>
-        <TableCell colSpan={showActions ? 6 : 5} sx={{ p: 0 }}>
+        <TableCell colSpan={5} sx={{ p: 0 }}>
           <Collapse in={open} timeout="auto" unmountOnExit>
             <Box m={2}>
               <Typography variant="h6" gutterBottom sx={{ fontWeight: 700 }}>
@@ -366,12 +386,13 @@ function EmployeeRow({
                             <TableCell>End Time</TableCell>
                             <TableCell>Reason</TableCell>
                             <TableCell>Duration (min)</TableCell>
-                            {canManageLogs && <TableCell align="right">Actions</TableCell>}
+                            {canManage && <TableCell align="center">Actions</TableCell>}
                           </TableRow>
                         </TableHead>
                         <TableBody>
                           {sessions.map((s, i) => {
                             const isAuto = s.kind === "AutoBreak" || s.category === "AutoBreak";
+                            const canAct = canManage && !isAuto;
                             return (
                               <TableRow key={String(i)}>
                                 <TableCell>
@@ -412,27 +433,33 @@ function EmployeeRow({
                                 <TableCell>
                                   {isAuto ? Number(s.duration || 0).toFixed(1) + " min" : (s.duration || 0) + " min"}
                                 </TableCell>
-
-                                {canManageLogs && (
-                                  <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
-                                    {!isAuto && (
-                                      <>
-                                        <Tooltip title="Edit log">
-                                          <IconButton size="small" onClick={() => onEditLog(s, emp)}>
-                                            <EditOutlined fontSize="small" />
-                                          </IconButton>
-                                        </Tooltip>
-                                        <Tooltip title="Delete log">
-                                          <IconButton
-                                            size="small"
-                                            color="error"
-                                            onClick={() => onDeleteLog(s, emp)}
-                                          >
-                                            <DeleteOutline fontSize="small" />
-                                          </IconButton>
-                                        </Tooltip>
-                                      </>
-                                    )}
+                                {canManage && (
+                                  <TableCell align="center" sx={{ whiteSpace: "nowrap" }}>
+                                    <Tooltip title="Edit reason/category">
+                                      <span>
+                                        <IconButton size="small" disabled={!canAct} onClick={() => startEdit(s)}>
+                                          <Edit fontSize="small" />
+                                        </IconButton>
+                                      </span>
+                                    </Tooltip>
+                                    <Tooltip title="End now">
+                                      <span>
+                                        <IconButton
+                                          size="small"
+                                          disabled={!canAct || Boolean(s.end_time_local && s.end_time_local !== "Ongoing")}
+                                          onClick={() => endNow(s)}
+                                        >
+                                          <StopCircle fontSize="small" />
+                                        </IconButton>
+                                      </span>
+                                    </Tooltip>
+                                    <Tooltip title="Delete log">
+                                      <span>
+                                        <IconButton size="small" color="error" disabled={!canAct} onClick={() => deleteLog(s)}>
+                                          <Delete fontSize="small" />
+                                        </IconButton>
+                                      </span>
+                                    </Tooltip>
                                   </TableCell>
                                 )}
                               </TableRow>
@@ -524,6 +551,49 @@ function EmployeeRow({
           </Collapse>
         </TableCell>
       </TableRow>
+
+      {/* Edit dialog */}
+      <Dialog open={editOpen} onClose={() => setEditOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Edit Activity Log</DialogTitle>
+        <DialogContent dividers>
+          <Box display="flex" gap={2} mt={1} flexDirection="column">
+            <FormControl size="small">
+              <InputLabel id="cat-lbl">Category</InputLabel>
+              <Select
+                labelId="cat-lbl"
+                label="Category"
+                value={editCategory}
+                onChange={(e) => setEditCategory(e.target.value)}
+              >
+                <MenuItem value="">
+                  <em>Uncategorized</em>
+                </MenuItem>
+                <MenuItem value="Official">Official</MenuItem>
+                <MenuItem value="General">General</MenuItem>
+                <MenuItem value="Namaz">Namaz</MenuItem>
+              </Select>
+            </FormControl>
+            <TextField
+              label="Reason"
+              value={editReason}
+              onChange={(e) => setEditReason(e.target.value)}
+              multiline
+              minRows={3}
+            />
+            {editTarget && (
+              <Typography variant="caption" color="text.secondary">
+                Log ID: {editTarget._id}
+              </Typography>
+            )}
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={saveEdit}>
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
     </>
   );
 }
@@ -532,9 +602,8 @@ export default function Employees() {
   const theme = useTheme();
   const role = getRole(); // 'employee' | 'admin' | 'superadmin'
   const isEmployee = role === "employee";
-  const isSuper = role === "superadmin";
   const canDownload = role === "admin" || role === "superadmin";
-  const canManageLogs = role === "admin" || role === "superadmin";
+  const canManage = role === "admin" || role === "superadmin";
 
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
@@ -560,29 +629,6 @@ export default function Employees() {
 
   const [anchorEl, setAnchorEl] = useState(null);
   const openMenu = Boolean(anchorEl);
-
-  // employee edit/delete
-  const [editOpen, setEditOpen] = useState(false);
-  const [editEmp, setEditEmp] = useState(null);
-  const [editForm, setEditForm] = useState({ name: "", department: "", shift_start: "", shift_end: "" });
-  const [deleteOpen, setDeleteOpen] = useState(false);
-
-  // log edit/delete
-  const [logEditOpen, setLogEditOpen] = useState(false);
-  const [logForm, setLogForm] = useState({
-    _id: "",
-    who: "",
-    dateYmd: "",
-    startHM: "",
-    endHM: "",
-    reason: "",
-    category: "General",
-    status: "Idle",
-  });
-  const [logDeleteOpen, setLogDeleteOpen] = useState(false);
-
-  const [busyAction, setBusyAction] = useState(false);
-  const abortRef = useRef(null);
 
   useEffect(() => {
     if (isEmployee) setEmployeeFilter(getSelfEmpId() || "all");
@@ -610,6 +656,8 @@ export default function Employees() {
     }
     return list;
   }, [employees, employeeFilter, search]);
+
+  const abortRef = useRef(null);
 
   const fetchEmployees = async () => {
     try {
@@ -745,14 +793,14 @@ export default function Employees() {
     return rows;
   }
 
-  /* ===== PDF / Excel exporters (unchanged) ===== */
   function downloadPDFDailySummaryAll() {
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
     const pageW = doc.internal.pageSize.getWidth();
     const brand = [31, 41, 55];
     const accent = [99, 102, 241];
     const label = mode === "day" ? day : from + " → " + to;
-    const title = mode === "day" ? "Daily Idle Report" : mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report";
+    const title =
+      mode === "day" ? "Daily Idle Report" : mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report";
     const gDaily = config.generalIdleLimit == null ? 60 : config.generalIdleLimit;
     const nDaily = config.namazLimit == null ? 50 : config.namazLimit;
     const gCap = effectiveGeneralLimit();
@@ -898,8 +946,7 @@ export default function Employees() {
 
   function downloadPDFMonthlyTotals(allOrSelected = "all") {
     if (mode !== "month") return;
-    const list =
-      allOrSelected === "all" ? filtered : employeeFilter === "all" ? [] : filtered.slice(0, 1);
+    const list = allOrSelected === "all" ? filtered : employeeFilter === "all" ? [] : filtered.slice(0, 1);
     if (!list.length) return;
 
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
@@ -914,11 +961,7 @@ export default function Employees() {
       doc.setFont("helvetica", "bold");
       doc.setFontSize(20);
       doc.setTextColor("#fff");
-      doc.text(
-        "Monthly Totals — " + (allOrSelected === "all" ? "All Employees" : cleanName(list[0].name)),
-        40,
-        26
-      );
+      doc.text("Monthly Totals — " + (allOrSelected === "all" ? "All Employees" : cleanName(list[0].name)), 40, 26);
       doc.setFont("helvetica", "normal");
       doc.setFontSize(11);
       doc.text(
@@ -1066,123 +1109,12 @@ export default function Employees() {
     return downloadPDFDailySummaryAll();
   }
 
-  /* ===== employee edit/delete (superadmin) ===== */
-  function openEdit(emp) {
-    setEditEmp(emp);
-    setEditForm({
-      name: emp?.name || "",
-      department: emp?.department || "",
-      shift_start: emp?.shift_start || "",
-      shift_end: emp?.shift_end || "",
-    });
-    setEditOpen(true);
-  }
-  async function saveEdit() {
-    if (!editEmp) return;
-    setBusyAction(true);
-    try {
-      const id = editEmp.emp_id || editEmp.id || editEmp._id;
-      await api.put(`/employees/${id}`, {
-        name: editForm.name,
-        department: editForm.department,
-        shift_start: editForm.shift_start,
-        shift_end: editForm.shift_end,
-      });
-      setEditOpen(false);
-      await fetchEmployees();
-    } catch (e) {
-      alert(e?.response?.data?.error || e.message || "Failed to update employee");
-    } finally {
-      setBusyAction(false);
-    }
-  }
-  function openDelete(emp) {
-    setEditEmp(emp);
-    setDeleteOpen(true);
-  }
-  async function doDelete() {
-    if (!editEmp) return;
-    setBusyAction(true);
-    try {
-      const id = editEmp.emp_id || editEmp.id || editEmp._id;
-      await api.delete(`/employees/${id}`);
-      setDeleteOpen(false);
-      await fetchEmployees();
-    } catch (e) {
-      alert(e?.response?.data?.error || e.message || "Failed to delete employee");
-    } finally {
-      setBusyAction(false);
-    }
-  }
-
-  /* ===== log edit/delete (admin or superadmin) ===== */
-  function onEditLog(s, emp) {
-    setLogForm({
-      _id: s._id,
-      who: emp?.name || "",
-      dateYmd: s.shiftDate || ymdInAsiaFromISO(s.idle_start) || day,
-      startHM: (s.start_time_local || "").slice(0, 5),
-      endHM: s.end_time_local && s.end_time_local !== "Ongoing" ? s.end_time_local.slice(0, 5) : "",
-      reason: s.reason || "",
-      category: s.category || "General",
-      status: "Idle",
-    });
-    setLogEditOpen(true);
-  }
-  function onDeleteLog(s /*, emp*/) {
-    setLogForm((f) => ({ ...f, _id: s._id }));
-    setLogDeleteOpen(true);
-  }
-
-  async function saveLogEdit() {
-    setBusyAction(true);
-    try {
-      const payload = {
-        reason: logForm.reason,
-        category: logForm.category,
-        status: logForm.status,
-      };
-      if (logForm.startHM) payload.idle_start = isoFromKarachi(logForm.dateYmd, logForm.startHM);
-      if (logForm.endHM === "") payload.idle_end = null; // clear end
-      else if (logForm.endHM) payload.idle_end = isoFromKarachi(logForm.dateYmd, logForm.endHM);
-
-      await api.put(`/activities/${logForm._id}`, payload);
-      setLogEditOpen(false);
-      await fetchEmployees();
-    } catch (e) {
-      alert(e?.response?.data?.error || e.message || "Failed to update activity log");
-    } finally {
-      setBusyAction(false);
-    }
-  }
-
-  async function doLogDelete() {
-    setBusyAction(true);
-    try {
-      await api.delete(`/activities/${logForm._id}`);
-      setLogDeleteOpen(false);
-      await fetchEmployees();
-    } catch (e) {
-      alert(e?.response?.data?.error || e.message || "Failed to delete activity log");
-    } finally {
-      setBusyAction(false);
-    }
-  }
-
-  function endLogNow() {
-    const { h, m } = karachiNowHM();
-    setLogForm((f) => ({ ...f, endHM: `${pad(h)}:${pad(m)}` }));
-  }
-  function clearEndTime() {
-    setLogForm((f) => ({ ...f, endHM: "" }));
-  }
-
   const headerGradient =
     "linear-gradient(90deg, " + theme.palette.primary.main + ", " + theme.palette.success.main + ")";
 
   const skeletonRow = (
     <TableRow>
-      <TableCell colSpan={isSuper ? 6 : 5}>
+      <TableCell colSpan={5}>
         <Box display="flex" gap={2} alignItems="center">
           <Skeleton variant="circular" width={40} height={40} />
           <Box flex={1}>
@@ -1266,11 +1198,7 @@ export default function Employees() {
         <Box flex={1} />
         {canDownload && (
           <>
-            <Button
-              variant="contained"
-              startIcon={<Download />}
-              onClick={(e) => setAnchorEl(e.currentTarget)}
-            >
+            <Button variant="contained" startIcon={<Download />} onClick={(e) => setAnchorEl(e.currentTarget)}>
               {isSingleSelected ? "Download: " + selectedName : "Download Report"}
             </Button>
             <Menu anchorEl={anchorEl} open={openMenu} onClose={() => setAnchorEl(null)}>
@@ -1355,11 +1283,6 @@ export default function Employees() {
               <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="center">
                 Sessions
               </TableCell>
-              {isSuper && (
-                <TableCell sx={{ color: "#fff", fontWeight: 600 }} align="right">
-                  Actions
-                </TableCell>
-              )}
             </TableRow>
           </TableHead>
           <TableBody>
@@ -1375,172 +1298,16 @@ export default function Employees() {
                     to={to}
                     categoryColors={config.categoryColors}
                     defaultOpen={filtered.length === 1}
-                    showActions={isSuper}
-                    onEdit={openEdit}
-                    onDelete={openDelete}
-                    canManageLogs={canManageLogs}
-                    onEditLog={onEditLog}
-                    onDeleteLog={onDeleteLog}
+                    canManage={canManage}
+                    onChanged={fetchEmployees}
                   />
                 ))}
           </TableBody>
         </Table>
       </TableContainer>
-
-      {/* Employee Edit dialog */}
-      <Dialog open={editOpen} onClose={() => setEditOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Edit Employee</DialogTitle>
-        <DialogContent sx={{ pt: 2 }}>
-          <TextField
-            label="Name"
-            fullWidth
-            margin="dense"
-            value={editForm.name}
-            onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))}
-          />
-          <TextField
-            label="Department"
-            fullWidth
-            margin="dense"
-            value={editForm.department}
-            onChange={(e) => setEditForm((f) => ({ ...f, department: e.target.value }))}
-          />
-          <Box display="flex" gap={2} mt={1}>
-            <TextField
-              label="Shift Start (HH:mm)"
-              fullWidth
-              value={editForm.shift_start}
-              onChange={(e) => setEditForm((f) => ({ ...f, shift_start: e.target.value }))}
-            />
-            <TextField
-              label="Shift End (HH:mm)"
-              fullWidth
-              value={editForm.shift_end}
-              onChange={(e) => setEditForm((f) => ({ ...f, shift_end: e.target.value }))}
-            />
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button startIcon={<Close />} onClick={() => setEditOpen(false)} disabled={busyAction}>
-            Cancel
-          </Button>
-          <Button startIcon={<Save />} variant="contained" onClick={saveEdit} disabled={busyAction}>
-            Save
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Employee Delete confirm */}
-      <Dialog open={deleteOpen} onClose={() => setDeleteOpen(false)}>
-        <DialogTitle>Delete employee?</DialogTitle>
-        <DialogContent>
-          <Typography>
-            Are you sure you want to delete <b>{editEmp?.name}</b>?
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDeleteOpen(false)} disabled={busyAction}>
-            Cancel
-          </Button>
-          <Button color="error" variant="contained" onClick={doDelete} disabled={busyAction}>
-            Delete
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Log Edit dialog (admin / superadmin) */}
-      <Dialog open={logEditOpen} onClose={() => setLogEditOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Edit Activity Log — {logForm.who}</DialogTitle>
-        <DialogContent sx={{ pt: 2 }}>
-          <Box display="flex" gap={2}>
-            <TextField
-              label="Date (Karachi)"
-              type="date"
-              value={logForm.dateYmd}
-              onChange={(e) => setLogForm((f) => ({ ...f, dateYmd: e.target.value }))}
-              InputLabelProps={{ shrink: true }}
-              fullWidth
-            />
-            <TextField
-              label="Start (HH:mm)"
-              type="time"
-              value={logForm.startHM}
-              onChange={(e) => setLogForm((f) => ({ ...f, startHM: e.target.value }))}
-              InputLabelProps={{ shrink: true }}
-              fullWidth
-            />
-            <TextField
-              label="End (HH:mm)"
-              type="time"
-              value={logForm.endHM}
-              onChange={(e) => setLogForm((f) => ({ ...f, endHM: e.target.value }))}
-              InputLabelProps={{ shrink: true }}
-              fullWidth
-            />
-          </Box>
-
-          <Box display="flex" gap={2} mt={2}>
-            <Select
-              fullWidth
-              value={logForm.category}
-              onChange={(e) => setLogForm((f) => ({ ...f, category: e.target.value }))}
-            >
-              <MenuItem value="General">General</MenuItem>
-              <MenuItem value="Official">Official</MenuItem>
-              <MenuItem value="Namaz">Namaz</MenuItem>
-            </Select>
-            <Select
-              fullWidth
-              value={logForm.status}
-              onChange={(e) => setLogForm((f) => ({ ...f, status: e.target.value }))}
-            >
-              <MenuItem value="Idle">Idle</MenuItem>
-              <MenuItem value="Active">Active</MenuItem>
-            </Select>
-          </Box>
-
-          <TextField
-            label="Reason"
-            value={logForm.reason}
-            onChange={(e) => setLogForm((f) => ({ ...f, reason: e.target.value }))}
-            fullWidth
-            margin="dense"
-            multiline
-            minRows={2}
-          />
-
-          <Box mt={1} display="flex" gap={1}>
-            <Button size="small" onClick={endLogNow}>End Now</Button>
-            <Button size="small" onClick={clearEndTime}>Clear End</Button>
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button startIcon={<Close />} onClick={() => setLogEditOpen(false)} disabled={busyAction}>
-            Cancel
-          </Button>
-          <Button startIcon={<Save />} variant="contained" onClick={saveLogEdit} disabled={busyAction}>
-            Save
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Log Delete confirm */}
-      <Dialog open={logDeleteOpen} onClose={() => setLogDeleteOpen(false)}>
-        <DialogTitle>Delete activity log?</DialogTitle>
-        <DialogContent>
-          <Typography>Are you sure you want to delete this activity log?</Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setLogDeleteOpen(false)} disabled={busyAction}>
-            Cancel
-          </Button>
-          <Button color="error" variant="contained" onClick={doLogDelete} disabled={busyAction}>
-            Delete
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 }
+
 
 
