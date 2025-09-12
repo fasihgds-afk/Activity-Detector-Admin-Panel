@@ -1,5 +1,5 @@
-// src/pages/Employees.jsx
 /* eslint-disable no-console */
+// src/pages/Employees.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Paper,
@@ -41,7 +41,7 @@ import {
   DeleteOutline,
   Close,
   Save,
-  FlagRounded,          // 👈 added for exceed flags
+  Flag,
 } from "@mui/icons-material";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -50,6 +50,10 @@ import { getRole, getSelfEmpId } from "../auth";
 
 const ZONE = "Asia/Karachi";
 const DEFAULT_LIMIT = 100;
+
+/* ===== requested caps ===== */
+const CAP_GENERAL_DAY = 60;
+const CAP_NAMAZ_DAY = 40;
 
 const pad = (n) => (n < 10 ? "0" + n : "" + n);
 
@@ -149,50 +153,8 @@ function isInShiftNow(shiftStart, shiftEnd) {
   const e = hmToMinutes(shiftEnd);
   if (s == null || e == null) return false;
   if (e >= s) return now >= s && now <= e;
-  return now >= s || now <= e; // crosses midnight
+  return now >= s || now <= e; // crosses midnight (6 PM–3 AM, 9 PM–6 AM)
 }
-function computeDbAwareStatus(emp, ctx) {
-  const raw = (emp && emp.latest_status ? String(emp.latest_status) : "").trim().toLowerCase();
-  const sessions = Array.isArray(emp && emp.idle_sessions) ? emp.idle_sessions : [];
-  const ongoing = sessions
-    .filter((s) => inPickedRange(s.shiftDate, ctx.mode, ctx.day, ctx.from, ctx.to, s.idle_start))
-    .find((s) => !s.end_time_local || s.end_time_local === "Ongoing");
-  const onCat = ongoing && ongoing.category;
-  if (raw === "active" || raw === "online" || raw === "working") return { label: "Active", color: "success" };
-  if (raw === "idle") {
-    if (onCat) {
-      const color =
-        onCat === "Official"
-          ? "info"
-          : onCat === "Namaz"
-          ? "success"
-          : onCat === "AutoBreak"
-          ? "error"
-          : "warning";
-      return { label: "On Break — " + onCat, color };
-    }
-    return null;
-  }
-  if (raw === "break" || raw === "on break" || raw === "paused")
-    return { label: onCat ? "On Break — " + onCat : "On Break", color: "warning" };
-  if (raw === "offline") return { label: "Offline", color: "default" };
-  if (raw === "unknown" || !raw) return null;
-  return { label: emp.latest_status, color: "default" };
-}
-function computeFallbackStatus(emp, ctx) {
-  const inShift = isInShiftNow(emp && emp.shift_start, emp && emp.shift_end);
-  if (!inShift) return { label: "Off Shift", color: "default" };
-  const sessions = Array.isArray(emp && emp.idle_sessions) ? emp.idle_sessions : [];
-  const ongoing = sessions
-    .filter((s) => inPickedRange(s.shiftDate, ctx.mode, ctx.day, ctx.from, ctx.to, s.idle_start))
-    .some((s) => !s.end_time_local || s.end_time_local === "Ongoing");
-  if (ongoing) return { label: "On Break", color: "warning" };
-  return { label: "Active", color: "success" };
-}
-function getStatusForEmp(emp, ctx) {
-  return computeDbAwareStatus(emp, ctx) || computeFallbackStatus(emp, ctx);
-}
-
 function summarizeReasonsByCategory(sessions) {
   const ORDER = ["General", "Namaz", "Official", "AutoBreak"];
   const OTHER = "Other";
@@ -221,17 +183,45 @@ function summarizeReasonsByCategory(sessions) {
   return parts.length ? parts.join(" • ") : "-";
 }
 
-/* ---------- Karachi → UTC helper ---------- */
+/* ---------- Karachi → UTC helpers ---------- */
 function isoFromKarachi(ymd /* YYYY-MM-DD */, hhmm /* HH:mm */) {
   if (!ymd || !hhmm) return null;
   const [Y, M, D] = ymd.split("-").map(Number);
   const [H, Min] = hhmm.split(":").map(Number);
-  // Karachi UTC+5
+  // Karachi is UTC+5 (no DST)
   const dt = new Date(Date.UTC(Y, M - 1, D, H - 5, Min || 0, 0));
   return dt.toISOString();
 }
+function addDaysYMD(ymd, days) {
+  const [Y, M, D] = ymd.split("-").map(Number);
+  const dt = new Date(Date.UTC(Y, M - 1, D));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
+}
+function hmToNum(hhmm) {
+  if (!hhmm) return null;
+  const [h, m] = hhmm.split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return h * 60 + m;
+}
+/** compose UTC ISO start/end from Karachi local ymd + times.
+ * if end < start ⇒ end goes to next day automatically. */
+function composeUtcPeriod(ymd, startHM, endHM) {
+  const startIso = startHM ? isoFromKarachi(ymd, startHM) : null;
+  let endIso = null;
 
-/* ---------- Row component ---------- */
+  if (endHM === "") {
+    endIso = null; // explicit clear
+  } else if (endHM) {
+    const s = hmToNum(startHM);
+    const e = hmToNum(endHM);
+    const endYmd = s != null && e != null && e < s ? addDaysYMD(ymd, 1) : ymd;
+    endIso = isoFromKarachi(endYmd, endHM);
+  }
+  return { startIso, endIso };
+}
+
+/* ---------- Row ---------- */
 function EmployeeRow({
   emp,
   dayMode,
@@ -240,13 +230,13 @@ function EmployeeRow({
   to,
   categoryColors,
   defaultOpen = false,
-  showActions = false,       // employee card actions (superadmin only)
+  showActions = false,
   onEdit,
   onDelete,
-  canManageLogs = false,     // 👈 log CRUD (superadmin only)
+  canManageLogs = false,
   onEditLog,
   onDeleteLog,
-  limits = { general: 60, namaz: 40 }, // 👈 daily limits used for flags
+  caps,
 }) {
   const theme = useTheme();
   const [open, setOpen] = useState(Boolean(defaultOpen));
@@ -273,12 +263,20 @@ function EmployeeRow({
     return map;
   }, [all, emp.shift_start, emp.shift_end, dayMode, pickedDay, from, to]);
 
-  const status = getStatusForEmp(emp, {
-    mode: dayMode,
-    day: pickedDay,
-    from,
-    to,
-  });
+  const raw = (emp && emp.latest_status ? String(emp.latest_status) : "").trim().toLowerCase();
+  const sessions = Array.isArray(emp && emp.idle_sessions) ? emp.idle_sessions : [];
+  const ongoing = sessions
+    .filter((s) => inPickedRange(s.shiftDate, dayMode, pickedDay, from, to, s.idle_start))
+    .some((s) => !s.end_time_local || s.end_time_local === "Ongoing");
+  let statusLabel = "Active";
+  let statusColor = "success";
+  if (raw === "idle" || ongoing) {
+    statusLabel = "On Break";
+    statusColor = "warning";
+  } else if (raw === "offline") {
+    statusLabel = "Offline";
+    statusColor = "default";
+  }
 
   const trackBorder = alpha(theme.palette.divider, 0.4);
   const cardBase = (col, opLight = 0.12, opDark = 0.18) => alpha(col, theme.palette.mode === "dark" ? opDark : opLight);
@@ -309,13 +307,11 @@ function EmployeeRow({
           />
         </TableCell>
         <TableCell>
-          <Chip label={status.label} color={status.color} variant="filled" sx={{ fontWeight: 600 }} />
+          <Chip label={statusLabel} color={statusColor} variant="filled" sx={{ fontWeight: 600 }} />
         </TableCell>
         <TableCell align="center">
           <Tooltip title="Show Sessions">
-            <IconButton onClick={() => setOpen((x) => !x)}>
-              {open ? <KeyboardArrowUp /> : <KeyboardArrowDown />}
-            </IconButton>
+            <IconButton onClick={() => setOpen((x) => !x)}>{open ? <KeyboardArrowUp /> : <KeyboardArrowDown />}</IconButton>
           </Tooltip>
         </TableCell>
 
@@ -342,24 +338,18 @@ function EmployeeRow({
               <Typography variant="h6" gutterBottom sx={{ fontWeight: 700 }}>
                 Idle Sessions & AutoBreaks
               </Typography>
-
               {Object.keys(grouped).length === 0 && (
                 <Typography color="text.secondary">No sessions in this date range.</Typography>
               )}
-
               {Object.entries(grouped).map(([key, sessions]) => {
                 const sums = calcTotals(sessions);
-
-                // 👇 per-day exceed checks (your screenshot case)
-                const genExceeded = sums.general > (limits.general ?? 60);
-                const namExceeded = sums.namaz > (limits.namaz ?? 40);
-                const genOverBy = Math.max(0, sums.general - (limits.general ?? 60));
-                const namOverBy = Math.max(0, sums.namaz - (limits.namaz ?? 40));
-
                 const totalBg = cardBase(theme.palette.warning.main);
                 const officialBg = cardBase(theme.palette.info.main);
                 const namazBg = cardBase(theme.palette.success.main);
                 const generalBg = cardBase(theme.palette.warning.main);
+
+                const genExceeded = sums.general > (caps?.general ?? CAP_GENERAL_DAY);
+                const namExceeded = sums.namaz > (caps?.namaz ?? CAP_NAMAZ_DAY);
 
                 return (
                   <Card
@@ -367,50 +357,20 @@ function EmployeeRow({
                     sx={{ mb: 3, borderRadius: 3, boxShadow: 3, border: "1px solid", borderColor: trackBorder }}
                   >
                     <CardContent>
-                      <Box
-                        display="flex"
-                        alignItems="center"
-                        justifyContent="space-between"
-                        flexWrap="wrap"
-                        gap={1}
-                        sx={{ mb: 2 }}
+                      <Typography
+                        variant="subtitle1"
+                        fontWeight={700}
+                        sx={{
+                          mb: 2,
+                          color: theme.palette.getContrastText(theme.palette.primary.main),
+                          bgcolor: theme.palette.primary.main,
+                          p: 1,
+                          borderRadius: 2,
+                          display: "inline-block",
+                        }}
                       >
-                        <Typography
-                          variant="subtitle1"
-                          fontWeight={700}
-                          sx={{
-                            color: theme.palette.getContrastText(theme.palette.primary.main),
-                            bgcolor: theme.palette.primary.main,
-                            px: 1.2,
-                            py: 0.75,
-                            borderRadius: 2,
-                            display: "inline-block",
-                          }}
-                        >
-                          {key}
-                        </Typography>
-
-                        {/* 🚩 chips if exceeded */}
-                        <Box display="flex" gap={1} flexWrap="wrap">
-                          {genExceeded && (
-                            <Chip
-                              icon={<FlagRounded />}
-                              color="error"
-                              label={`General exceeded by ${genOverBy} min`}
-                              sx={{ fontWeight: 700 }}
-                            />
-                          )}
-                          {namExceeded && (
-                            <Chip
-                              icon={<FlagRounded />}
-                              color="error"
-                              label={`Namaz exceeded by ${namOverBy} min`}
-                              sx={{ fontWeight: 700 }}
-                            />
-                          )}
-                        </Box>
-                      </Box>
-
+                        {key}
+                      </Typography>
                       <Table size="small">
                         <TableHead>
                           <TableRow>
@@ -463,32 +423,21 @@ function EmployeeRow({
                                   {s.reason || (isAuto ? "System Power Off / Startup" : "-")}
                                 </TableCell>
                                 <TableCell>
-                                  {isAuto
-                                    ? Number(s.duration || 0).toFixed(1) + " min"
-                                    : (s.duration || 0) + " min"}
+                                  {isAuto ? Number(s.duration || 0).toFixed(1) + " min" : (s.duration || 0) + " min"}
                                 </TableCell>
 
-                                {/* 👇 only SUPERADMIN sees CRUD buttons */}
-                                {canManageLogs && (
+                                {canManageLogs && !isAuto && (
                                   <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
-                                    {!isAuto && (
-                                      <>
-                                        <Tooltip title="Edit log">
-                                          <IconButton size="small" onClick={() => onEditLog(s, emp)}>
-                                            <EditOutlined fontSize="small" />
-                                          </IconButton>
-                                        </Tooltip>
-                                        <Tooltip title="Delete log">
-                                          <IconButton
-                                            size="small"
-                                            color="error"
-                                            onClick={() => onDeleteLog(s, emp)}
-                                          >
-                                            <DeleteOutline fontSize="small" />
-                                          </IconButton>
-                                        </Tooltip>
-                                      </>
-                                    )}
+                                    <Tooltip title="Edit log">
+                                      <IconButton size="small" onClick={() => onEditLog(s, emp)}>
+                                        <EditOutlined fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+                                    <Tooltip title="Delete log">
+                                      <IconButton size="small" color="error" onClick={() => onDeleteLog(s, emp)}>
+                                        <DeleteOutline fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
                                   </TableCell>
                                 )}
                               </TableRow>
@@ -497,7 +446,7 @@ function EmployeeRow({
                         </TableBody>
                       </Table>
 
-                      {/* Summary cards */}
+                      {/* Summary cards + exceed flags */}
                       <Box mt={2}>
                         <Grid container spacing={2}>
                           <Grid item xs={12} md={3}>
@@ -543,18 +492,18 @@ function EmployeeRow({
                                 borderRadius: 3,
                                 bgcolor: namazBg,
                                 border: "1px solid",
-                                borderColor: trackBorder,
+                                borderColor: namExceeded ? "error.main" : trackBorder,
                               }}
                             >
-                              <Typography fontWeight={700} color="success.main">
-                                Namaz Break Time
+                              <Typography fontWeight={700} color={namExceeded ? "error.main" : "success.main"}>
+                                Namaz Break Time {namExceeded && <Flag sx={{ fontSize: 18, ml: 0.5 }} />}
                               </Typography>
                               <Typography variant="h6" fontWeight={800}>
                                 {sums.namaz} min
                               </Typography>
                               {namExceeded && (
-                                <Typography variant="caption" color="error.main" fontWeight={700}>
-                                  🚩 Exceeded by {namOverBy} min
+                                <Typography variant="caption" color="error.main">
+                                  Exceeded 40 min
                                 </Typography>
                               )}
                             </Card>
@@ -566,16 +515,18 @@ function EmployeeRow({
                                 borderRadius: 3,
                                 bgcolor: generalBg,
                                 border: "1px solid",
-                                borderColor: trackBorder,
+                                borderColor: genExceeded ? "error.main" : trackBorder,
                               }}
                             >
-                              <Typography fontWeight={700}>General Break Time</Typography>
+                              <Typography fontWeight={700} color={genExceeded ? "error.main" : "warning.main"}>
+                                General Break Time {genExceeded && <Flag sx={{ fontSize: 18, ml: 0.5 }} />}
+                              </Typography>
                               <Typography variant="h6" fontWeight={800}>
                                 {sums.general} min
                               </Typography>
                               {genExceeded && (
-                                <Typography variant="caption" color="error.main" fontWeight={700}>
-                                  🚩 Exceeded by {genOverBy} min
+                                <Typography variant="caption" color="error.main">
+                                  Exceeded 60 min
                                 </Typography>
                               )}
                             </Card>
@@ -599,26 +550,18 @@ export default function Employees() {
   const role = getRole(); // 'employee' | 'admin' | 'superadmin'
   const isEmployee = role === "employee";
   const isSuper = role === "superadmin";
-
-  // ✅ admin can only download; CRUD is superadmin-only
   const canDownload = role === "admin" || role === "superadmin";
-  const canManageLogs = role === "superadmin"; // 👈 changed from (admin || superadmin)
+  const canManageLogs = role === "superadmin"; // admin cannot CRUD (per your request)
 
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
 
-  // Frontend caps (fallbacks): General 60 / Namaz 40
   const [config, setConfig] = useState({
-    generalIdleLimit: 60,
-    namazLimit: 40,
-    categoryColors: {
-      Official: "#3b82f6",
-      General: "#f59e0b",
-      Namaz: "#10b981",
-      AutoBreak: "#ef4444",
-    },
+    generalIdleLimit: CAP_GENERAL_DAY,
+    namazLimit: CAP_NAMAZ_DAY,
+    categoryColors: { Official: "#3b82f6", General: "#f59e0b", Namaz: "#10b981", AutoBreak: "#ef4444" },
   });
 
   const [employeeFilter, setEmployeeFilter] = useState("all");
@@ -635,18 +578,13 @@ export default function Employees() {
   const [anchorEl, setAnchorEl] = useState(null);
   const openMenu = Boolean(anchorEl);
 
-  // employee edit/delete (super)
+  // employee edit/delete (superadmin only)
   const [editOpen, setEditOpen] = useState(false);
   const [editEmp, setEditEmp] = useState(null);
-  const [editForm, setEditForm] = useState({
-    name: "",
-    department: "",
-    shift_start: "",
-    shift_end: "",
-  });
+  const [editForm, setEditForm] = useState({ name: "", department: "", shift_start: "", shift_end: "" });
   const [deleteOpen, setDeleteOpen] = useState(false);
 
-  // log edit/delete (super)
+  // log edit/delete (superadmin only)
   const [logEditOpen, setLogEditOpen] = useState(false);
   const [logForm, setLogForm] = useState({
     _id: "",
@@ -678,7 +616,12 @@ export default function Employees() {
 
   const filtered = useMemo(() => {
     let list = Array.isArray(employees) ? employees : [];
-    if (employeeFilter !== "all") {
+    if (isEmployee) {
+      // hard lock to self
+      list = list.filter(
+        (e) => e.emp_id === getSelfEmpId() || e.id === getSelfEmpId() || e._id === getSelfEmpId()
+      );
+    } else if (employeeFilter !== "all") {
       list = list.filter(
         (e) => e.emp_id === employeeFilter || e.id === employeeFilter || e._id === employeeFilter
       );
@@ -688,7 +631,7 @@ export default function Employees() {
       list = list.filter((e) => e.name && e.name.toLowerCase().includes(s));
     }
     return list;
-  }, [employees, employeeFilter, search]);
+  }, [employees, employeeFilter, search, isEmployee]);
 
   const fetchEmployees = async () => {
     try {
@@ -716,19 +659,13 @@ export default function Employees() {
       setEmployees(arr);
 
       const gl = payload?.settings?.general_idle_limit;
-      const nl = payload?.settings?.namaz_limit;
       setConfig((c) => ({
         ...c,
-        generalIdleLimit: gl ?? 60,
-        namazLimit: nl ?? 40,
+        generalIdleLimit: gl ?? CAP_GENERAL_DAY,
+        namazLimit: CAP_NAMAZ_DAY, // force 40m as requested
         categoryColors:
           payload?.categoryColors ||
-          c.categoryColors || {
-            Official: "#3b82f6",
-            General: "#f59e0b",
-            Namaz: "#10b981",
-            AutoBreak: "#ef4444",
-          },
+          c.categoryColors || { Official: "#3b82f6", General: "#f59e0b", Namaz: "#10b981", AutoBreak: "#ef4444" },
       }));
     } catch (e) {
       if (e.code !== "ERR_CANCELED") {
@@ -759,7 +696,7 @@ export default function Employees() {
     };
   }, [mode, day, month, from, to]);
 
-  const isSingleSelected = employeeFilter !== "all" && filtered.length === 1;
+  const isSingleSelected = filtered.length === 1;
   const selectedName = isSingleSelected ? cleanName(filtered[0] && filtered[0].name) : "";
   const quickLabel =
     mode === "day"
@@ -778,9 +715,15 @@ export default function Employees() {
     return window.confirm("Download " + label + "?");
   }
   function inScopeSessions(emp) {
-    return (emp.idle_sessions || []).filter((s) =>
-      inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start)
-    );
+    return (emp.idle_sessions || []).filter((s) => inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start));
+  }
+  function uniqueDays(sessions) {
+    const set = new Set();
+    for (const s of sessions) {
+      const d = s.shiftDate || ymdInAsiaFromISO(s.idle_start);
+      if (d) set.add(d);
+    }
+    return set;
   }
   function toH1(min) {
     return ((min || 0) / 60).toFixed(1);
@@ -793,12 +736,12 @@ export default function Employees() {
     return new Date(yy, mm, 0).getDate();
   }
   function effectiveGeneralLimit(daysOverride) {
-    const daily = config.generalIdleLimit == null ? 60 : config.generalIdleLimit;
+    const daily = config.generalIdleLimit ?? CAP_GENERAL_DAY;
     const mult = mode === "month" ? (daysOverride == null ? getMonthDays() : daysOverride) : 1;
     return daily * mult;
   }
   function effectiveNamazLimit(daysOverride) {
-    const daily = config.namazLimit == null ? 40 : config.namazLimit;
+    const daily = config.namazLimit ?? CAP_NAMAZ_DAY;
     const mult = mode === "month" ? (daysOverride == null ? getMonthDays() : daysOverride) : 1;
     return daily * mult;
   }
@@ -831,13 +774,9 @@ export default function Employees() {
     const accent = [99, 102, 241];
     const label = mode === "day" ? day : from + " → " + to;
     const title =
-      mode === "day"
-        ? "Daily Idle Report"
-        : mode === "month"
-        ? "Monthly Idle Report"
-        : "Custom Range Idle Report";
-    const gDaily = config.generalIdleLimit == null ? 60 : config.generalIdleLimit;
-    const nDaily = config.namazLimit == null ? 40 : config.namazLimit;
+      mode === "day" ? "Daily Idle Report" : mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report";
+    const gDaily = config.generalIdleLimit ?? CAP_GENERAL_DAY;
+    const nDaily = config.namazLimit ?? CAP_NAMAZ_DAY;
     const gCap = effectiveGeneralLimit();
     const nCap = effectiveNamazLimit();
     const limitsText =
@@ -856,9 +795,7 @@ export default function Employees() {
       doc.setFontSize(12);
       doc.text(title, 40, 46);
       doc.setFontSize(10);
-      doc.text("Range: " + label + " | TZ: " + ZONE + " | " + limitsText, pageW - 40, 26, {
-        align: "right",
-      });
+      doc.text("Range: " + label + " | TZ: " + ZONE + " | " + limitsText, pageW - 40, 26, { align: "right" });
     };
 
     const body = collectReportRowsWithReasons();
@@ -885,13 +822,7 @@ export default function Employees() {
         halign: "center",
         valign: "middle",
       },
-      headStyles: {
-        fillColor: accent,
-        textColor: 255,
-        halign: "center",
-        fontStyle: "bold",
-        overflow: "linebreak",
-      },
+      headStyles: { fillColor: accent, textColor: 255, halign: "center", fontStyle: "bold", overflow: "linebreak" },
       theme: "striped",
       striped: true,
       alternateRowStyles: { fillColor: [248, 250, 252] },
@@ -914,7 +845,7 @@ export default function Employees() {
   }
 
   function downloadPDFDailyDetailSelected() {
-    if (employeeFilter === "all" || !filtered.length || mode !== "day") return;
+    if (!isSingleSelected || mode !== "day") return;
     const emp = filtered[0];
     const empName = cleanName(emp.name);
     const sessions = inScopeSessions(emp).sort(
@@ -1006,7 +937,7 @@ export default function Employees() {
   function downloadPDFMonthlyTotals(allOrSelected = "all") {
     if (mode !== "month") return;
     const list =
-      allOrSelected === "all" ? filtered : employeeFilter === "all" ? [] : filtered.slice(0, 1);
+      allOrSelected === "all" ? filtered : isSingleSelected ? filtered.slice(0, 1) : [];
     if (!list.length) return;
 
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
@@ -1034,9 +965,9 @@ export default function Employees() {
           " → " +
           mt +
           " | Caps/day: General " +
-          (config.generalIdleLimit ?? 60) +
+          (config.generalIdleLimit ?? CAP_GENERAL_DAY) +
           "m, Namaz " +
-          (config.namazLimit ?? 40) +
+          (config.namazLimit ?? CAP_NAMAZ_DAY) +
           "m | TZ: " +
           ZONE,
         40,
@@ -1050,20 +981,30 @@ export default function Employees() {
     for (const emp of list) {
       const sessions = inScopeSessions(emp);
       const sums = calcTotals(sessions);
-      const days = new Set(sessions.map((s) => s.shiftDate || ymdInAsiaFromISO(s.idle_start))).size || 0;
-      const gCap = (config.generalIdleLimit ?? 60) * (days || 1);
-      const nCap = (config.namazLimit ?? 40) * (days || 1);
+      const days =
+        uniqueDays(sessions).size ||
+        new Date(parseInt(month.slice(0, 4), 10), parseInt(month.slice(5), 10), 0).getDate();
+      const shiftSpan = (() => {
+        const s = hmToMinutes(emp.shift_start);
+        const e = hmToMinutes(emp.shift_end);
+        if (s == null || e == null) return 9 * 60;
+        return e >= s ? e - s : 24 * 60 - s + e;
+      })();
+      const workMin = Math.max(0, shiftSpan * days - sums.total);
+      const gCap = effectiveGeneralLimit(days);
+      const nCap = effectiveNamazLimit(days);
       rows.push([
         emp.emp_id || emp.id || emp._id,
         emp.name || "-",
         emp.department || "-",
+        toH1(workMin),
         toH1(sums.general),
         toH1(sums.namaz),
         toH1(sums.official),
         toH1(sums.autobreak),
         sums.general > gCap ? "+" + toH1(sums.general - gCap) + "h" : "-",
         sums.namaz > nCap ? "+" + toH1(sums.namaz - nCap) + "h" : "-",
-        days || new Date(parseInt(month.slice(0, 4), 10), parseInt(month.slice(5), 10), 0).getDate(),
+        days,
       ]);
     }
 
@@ -1071,6 +1012,7 @@ export default function Employees() {
       "Emp ID",
       "Name",
       "Dept",
+      "Working (h)",
       "General (h)",
       "Namaz (h)",
       "Official (h)",
@@ -1092,7 +1034,13 @@ export default function Employees() {
     const fname =
       allOrSelected === "all"
         ? "monthly_totals_" + mf.split("-").join("") + "_" + mt.split("-").join("") + ".pdf"
-        : "monthly_" + slugName(list[0].name) + "_" + mf.split("-").join("") + "_" + mt.split("-").join("") + ".pdf";
+        : "monthly_" +
+          slugName(list[0].name) +
+          "_" +
+          mf.split("-").join("") +
+          "_" +
+          mt.split("-").join("") +
+          ".pdf";
 
     doc.save(fname);
   }
@@ -1211,7 +1159,7 @@ export default function Employees() {
     }
   }
 
-  /* ===== log edit/delete (SUPERADMIN ONLY) ===== */
+  /* ===== log edit/delete (superadmin only) ===== */
   function onEditLog(s, emp) {
     setLogForm({
       _id: s._id,
@@ -1238,9 +1186,11 @@ export default function Employees() {
         category: logForm.category,
         status: logForm.status,
       };
-      if (logForm.startHM) payload.idle_start = isoFromKarachi(logForm.dateYmd, logForm.startHM);
-      if (logForm.endHM === "") payload.idle_end = null; // clear end
-      else if (logForm.endHM) payload.idle_end = isoFromKarachi(logForm.dateYmd, logForm.endHM);
+
+      const { startIso, endIso } = composeUtcPeriod(logForm.dateYmd, logForm.startHM, logForm.endHM);
+      if (startIso) payload.idle_start = startIso;
+      if (logForm.endHM === "") payload.idle_end = null;
+      else if (endIso) payload.idle_end = endIso;
 
       await api.put(`/activities/${logForm._id}`, payload);
       setLogEditOpen(false);
@@ -1299,15 +1249,16 @@ export default function Employees() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           sx={{ minWidth: 260 }}
+          disabled={isEmployee}
         />
         <Select
           size="small"
-          value={employeeFilter}
-          disabled={isEmployee} // employee cannot change (locked to self)
+          value={isEmployee ? (filtered[0]?.emp_id || "self") : employeeFilter}
+          disabled={isEmployee}
           onChange={(e) => setEmployeeFilter(e.target.value)}
           sx={{ minWidth: 200 }}
         >
-          <MenuItem value="all">All Employees</MenuItem>
+          {!isEmployee && <MenuItem value="all">All Employees</MenuItem>}
           {employees.map((e) => (
             <MenuItem key={e.emp_id || e.id || e._id} value={e.emp_id || e.id || e._id}>
               {e.name}
@@ -1430,8 +1381,13 @@ export default function Employees() {
 
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
         {mode === "day" ? "Range: " + day : "Range: " + from + " → " + to} &nbsp; | &nbsp;
-        {employeeFilter !== "all" ? "Employee: " + selectedName : "All Employees"} &nbsp; | &nbsp;
-        General: {config.generalIdleLimit ?? 60}m/day • Namaz: {config.namazLimit ?? 40}m/day &nbsp; | &nbsp; TZ: {ZONE}
+        {isEmployee
+          ? "Employee: You"
+          : employeeFilter !== "all"
+          ? "Employee: " + selectedName
+          : "All Employees"}{" "}
+        &nbsp; | &nbsp; General: {config.generalIdleLimit ?? CAP_GENERAL_DAY}m/day • Namaz:{" "}
+        {config.namazLimit ?? CAP_NAMAZ_DAY}m/day &nbsp; | &nbsp; TZ: {ZONE}
       </Typography>
 
       {err && (
@@ -1471,20 +1427,20 @@ export default function Employees() {
                     to={to}
                     categoryColors={config.categoryColors}
                     defaultOpen={filtered.length === 1}
-                    showActions={isSuper}             // employee card edit/delete → only superadmin
+                    showActions={isSuper}
                     onEdit={openEdit}
                     onDelete={openDelete}
-                    canManageLogs={canManageLogs}     // log CRUD → only superadmin
+                    canManageLogs={canManageLogs}
                     onEditLog={onEditLog}
                     onDeleteLog={onDeleteLog}
-                    limits={{ general: config.generalIdleLimit ?? 60, namaz: config.namazLimit ?? 40 }}
+                    caps={{ general: config.generalIdleLimit, namaz: config.namazLimit }}
                   />
                 ))}
           </TableBody>
         </Table>
       </TableContainer>
 
-      {/* Employee Edit dialog (superadmin) */}
+      {/* Employee Edit dialog */}
       <Dialog open={editOpen} onClose={() => setEditOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Edit Employee</DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
@@ -1527,7 +1483,7 @@ export default function Employees() {
         </DialogActions>
       </Dialog>
 
-      {/* Employee Delete confirm (superadmin) */}
+      {/* Employee Delete confirm */}
       <Dialog open={deleteOpen} onClose={() => setDeleteOpen(false)}>
         <DialogTitle>Delete employee?</DialogTitle>
         <DialogContent>
@@ -1545,7 +1501,7 @@ export default function Employees() {
         </DialogActions>
       </Dialog>
 
-      {/* Log Edit dialog (superadmin) */}
+      {/* Log Edit dialog (superadmin only) */}
       <Dialog open={logEditOpen} onClose={() => setLogEditOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Edit Activity Log — {logForm.who}</DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
@@ -1607,8 +1563,12 @@ export default function Employees() {
           />
 
           <Box mt={1} display="flex" gap={1}>
-            <Button size="small" onClick={endLogNow}>End Now</Button>
-            <Button size="small" onClick={clearEndTime}>Clear End</Button>
+            <Button size="small" onClick={endLogNow}>
+              End Now
+            </Button>
+            <Button size="small" onClick={clearEndTime}>
+              Clear End
+            </Button>
           </Box>
         </DialogContent>
         <DialogActions>
@@ -1621,7 +1581,7 @@ export default function Employees() {
         </DialogActions>
       </Dialog>
 
-      {/* Log Delete confirm (superadmin) */}
+      {/* Log Delete confirm */}
       <Dialog open={logDeleteOpen} onClose={() => setLogDeleteOpen(false)}>
         <DialogTitle>Delete activity log?</DialogTitle>
         <DialogContent>
@@ -1639,6 +1599,7 @@ export default function Employees() {
     </Box>
   );
 }
+
 
 
 
