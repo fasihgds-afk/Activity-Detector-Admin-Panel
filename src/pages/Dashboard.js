@@ -1,6 +1,4 @@
 // src/pages/Dashboard.jsx
-// TODAY-first fetch, lightweight queries, MUI + Recharts, RBAC-aware export visibility
-/* eslint-disable no-console */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Grid,
@@ -26,6 +24,7 @@ import {
   ToggleButton,
   ToggleButtonGroup,
 } from "@mui/material";
+import Flag from "@mui/icons-material/Flag";
 import { useTheme, alpha } from "@mui/material/styles";
 import {
   PieChart,
@@ -39,11 +38,14 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { FlagRounded } from "@mui/icons-material";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import api from "../api";
 import { getRole } from "../auth";
+
+/* ===== caps requested: General 60, Namaz 40 ===== */
+const CAP_GENERAL_DAY = 60;
+const CAP_NAMAZ_DAY = 40;
 
 // ---------- small utils ----------
 const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
@@ -77,7 +79,7 @@ function currentShiftYmd() {
   const now = new Date();
   const ymd = fmtYmd.format(now);
   const hour = parseInt(hourFmt.format(now), 10);
-  if (hour >= 6) return ymd;
+  if (hour >= 6) return ymd; // day belongs to same date after 6 AM
   const [y, m, d] = ymd.split("-").map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
   dt.setUTCDate(dt.getUTCDate() - 1);
@@ -108,12 +110,10 @@ function useColors(theme) {
 export default function Dashboard() {
   const theme = useTheme();
   const C = useColors(theme);
-
   const role = getRole();
-  const canDownload = role === "admin" || role === "superadmin";
 
   const [employees, setEmployees] = useState([]);
-  const [limits, setLimits] = useState({ general: 60, namaz: 40 }); // force 40 for Namaz cap
+  const [limits, setLimits] = useState({ general: CAP_GENERAL_DAY, namaz: CAP_NAMAZ_DAY });
   const [selectedEmp, setSelectedEmp] = useState("all");
   const [openDialog, setOpenDialog] = useState(false);
   const [scope, setScope] = useState("today"); // "today" | "month"
@@ -123,23 +123,29 @@ export default function Dashboard() {
   const pollRef = useRef(null);
 
   const todayYmd = useMemo(() => currentShiftYmd(), []);
-  const { start: monthStart, end: monthEnd, days: daysInMonth } = useMemo(() => firstLastOfMonth(todayYmd), [todayYmd]);
+  const { start: monthStart, end: monthEnd, days: daysInMonth } = useMemo(
+    () => firstLastOfMonth(todayYmd),
+    [todayYmd]
+  );
 
   async function fetchAll() {
     try {
       setLoading(true);
       const params =
-        scope === "today" ? { from: todayYmd, to: todayYmd, limit: 150 } : { from: monthStart, to: monthEnd, limit: 150 };
+        scope === "today"
+          ? { from: todayYmd, to: todayYmd, limit: 150 }
+          : { from: monthStart, to: monthEnd, limit: 150 };
       const res = await api.get("/employees", { params });
 
       const payload = Array.isArray(res.data) ? { employees: res.data } : res.data || {};
       const data = Array.isArray(payload.employees) ? payload.employees : [];
       setEmployees(data);
 
-      // Keep General from backend if present; Namaz = 40 hard cap per requirement
       const cfg = payload.settings || {};
-      const general = Number(cfg.general_idle_limit ?? 60);
-      setLimits({ general, namaz: 40 });
+      // force the requested caps: 60 / 40
+      const general = Number(cfg.general_idle_limit ?? CAP_GENERAL_DAY);
+      const namaz = Number(CAP_NAMAZ_DAY); // override to 40
+      setLimits({ general, namaz });
 
       setErr("");
       setUpdatedAt(new Date().toLocaleString("en-PK", { hour12: true }));
@@ -179,8 +185,8 @@ export default function Dashboard() {
     [scope, limits.general, daysInMonth]
   );
   const effectiveNamazLimit = useMemo(
-    () => (scope === "month" ? 40 * daysInMonth : 40), // force 40/day
-    [scope, daysInMonth]
+    () => (scope === "month" ? limits.namaz * daysInMonth : limits.namaz),
+    [scope, limits.namaz, daysInMonth]
   );
 
   const totalsToday = useMemo(() => {
@@ -238,6 +244,8 @@ export default function Dashboard() {
         status,
         color,
         score,
+        genExceeded: general > genCap,
+        namExceeded: namaz > namCap,
       });
     }
     return rows
@@ -266,8 +274,8 @@ export default function Dashboard() {
     const pageW = doc.internal.pageSize.getWidth();
     const limitsText =
       scope === "month"
-        ? `Limits: General ${limits.general}m/day (cap ${effectiveGeneralLimit}m), Namaz 40m/day (cap ${effectiveNamazLimit}m)`
-        : `Limits: General ${limits.general}m/day, Namaz 40m/day`;
+        ? `Limits: General ${limits.general}m/day (cap ${effectiveGeneralLimit}m), Namaz ${limits.namaz}m/day (cap ${effectiveNamazLimit}m)`
+        : `Limits: General ${limits.general}m/day, Namaz ${limits.namaz}m/day`;
 
     const header = (pageNumber) => {
       doc.setFillColor(31, 41, 55);
@@ -284,7 +292,16 @@ export default function Dashboard() {
     };
 
     const headers = ["#", "Name", "Dept", "Status", "General (m)", "Namaz (m)", "Official (m)", "Total (m)"];
-    const body = leaderboard.map((r) => [r.rank, r.name, r.department, r.status, r.general, r.namaz, r.official, r.total]);
+    const body = leaderboard.map((r) => [
+      r.rank,
+      r.name + (r.genExceeded || r.namExceeded ? " 🚩" : ""),
+      r.department,
+      r.status,
+      r.general,
+      r.namaz,
+      r.official,
+      r.total,
+    ]);
 
     autoTable(doc, {
       head: [headers],
@@ -307,7 +324,8 @@ export default function Dashboard() {
       columnStyles: { 1: { halign: "left" }, 2: { halign: "left" } },
     });
 
-    const fileLabel = scope === "today" ? todayYmd : `${monthStart.replaceAll("-", "")}_${monthEnd.replaceAll("-", "")}`;
+    const fileLabel =
+      scope === "today" ? todayYmd : `${monthStart.replaceAll("-", "")}_${monthEnd.replaceAll("-", "")}`;
     doc.save(`leaderboard_${fileLabel}.pdf`);
   }
 
@@ -340,8 +358,18 @@ export default function Dashboard() {
 
   function exportXLS() {
     const headers = ["Rank", "Name", "Department", "Status", "General (m)", "Namaz (m)", "Official (m)", "Total (m)"];
-    const rows = leaderboard.map((r) => [r.rank, r.name, r.department, r.status, r.general, r.namaz, r.official, r.total]);
-    const fileLabel = scope === "today" ? todayYmd : `${monthStart.replaceAll("-", "")}_${monthEnd.replaceAll("-", "")}`;
+    const rows = leaderboard.map((r) => [
+      r.rank,
+      r.name + (r.genExceeded || r.namExceeded ? " 🚩" : ""),
+      r.department,
+      r.status,
+      r.general,
+      r.namaz,
+      r.official,
+      r.total,
+    ]);
+    const fileLabel =
+      scope === "today" ? todayYmd : `${monthStart.replaceAll("-", "")}_${monthEnd.replaceAll("-", "")}`;
     downloadXls(`leaderboard_${fileLabel}.xls`, headers, rows);
   }
 
@@ -355,7 +383,11 @@ export default function Dashboard() {
 
   return (
     <Box p={4}>
-      {err && <Alert severity="warning" sx={{ mb: 2 }}>{err}</Alert>}
+      {err && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          {err}
+        </Alert>
+      )}
 
       {/* Top stats */}
       <Grid container spacing={3} sx={{ mb: 4 }}>
@@ -394,7 +426,9 @@ export default function Dashboard() {
             <Card sx={{ p: 2, bgcolor: C.namaz, color: theme.palette.getContrastText(C.namaz) }}>
               <CardContent>
                 <Typography variant="h6">Date (TZ Asia/Karachi)</Typography>
-                <Typography variant="h4" fontWeight={700}>{todayYmd}</Typography>
+                <Typography variant="h4" fontWeight={700}>
+                  {todayYmd}
+                </Typography>
               </CardContent>
             </Card>
           )}
@@ -407,7 +441,9 @@ export default function Dashboard() {
             <Card sx={{ p: 2, bgcolor: C.general, color: theme.palette.getContrastText(C.general) }}>
               <CardContent>
                 <Typography variant="h6">General Limit</Typography>
-                <Typography variant="h4" fontWeight={700}>{limits.general} m/day</Typography>
+                <Typography variant="h4" fontWeight={700}>
+                  {limits.general} m/day
+                </Typography>
               </CardContent>
             </Card>
           )}
@@ -420,40 +456,61 @@ export default function Dashboard() {
             <Card sx={{ p: 2, bgcolor: C.official, color: theme.palette.getContrastText(C.official) }}>
               <CardContent>
                 <Typography variant="h6">Namaz Limit</Typography>
-                <Typography variant="h4" fontWeight={700}>40 m/day</Typography>
+                <Typography variant="h4" fontWeight={700}>
+                  {limits.namaz} m/day
+                </Typography>
               </CardContent>
             </Card>
           )}
         </Grid>
       </Grid>
 
-      {/* Export + Scope (hidden for employees) */}
-      {canDownload && (
-        <Card sx={{ p: 3, mb: 4 }}>
-          <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
-            <Typography variant="h6" fontWeight={600} sx={{ mr: "auto" }}>
-              Quick Exports
-              <Typography variant="caption" sx={{ ml: 1 }} color="text.secondary">
-                Last updated: {updatedAt || "—"}
-              </Typography>
+      {/* Export + Scope */}
+      <Card sx={{ p: 3, mb: 4 }}>
+        <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
+          <Typography variant="h6" fontWeight={600} sx={{ mr: "auto" }}>
+            Quick Exports
+            <Typography variant="caption" sx={{ ml: 1 }} color="text.secondary">
+              Last updated: {updatedAt || "—"}
             </Typography>
+          </Typography>
 
-            <ToggleButtonGroup value={scope} exclusive onChange={(_, v) => v && setScope(v)} size="small" sx={{ mr: 1 }}>
-              <ToggleButton value="today">Today</ToggleButton>
-              <ToggleButton value="month">This Month</ToggleButton>
-            </ToggleButtonGroup>
+          <ToggleButtonGroup
+            value={scope}
+            exclusive
+            onChange={(_, v) => v && setScope(v)}
+            size="small"
+            sx={{ mr: 1 }}
+          >
+            <ToggleButton value="today">Today</ToggleButton>
+            <ToggleButton value="month">This Month</ToggleButton>
+          </ToggleButtonGroup>
 
-            <Button variant="contained" onClick={exportPDF}>Export PDF</Button>
-            <Button variant="outlined" onClick={exportXLS}>Export Excel</Button>
-          </Box>
-        </Card>
-      )}
+          {/* employees and admins can see dashboard; only admin & super can download */}
+          {["admin", "superadmin"].includes(role) && (
+            <>
+              <Button variant="contained" onClick={exportPDF}>
+                Export PDF
+              </Button>
+              <Button variant="outlined" onClick={exportXLS}>
+                Export Excel
+              </Button>
+            </>
+          )}
+        </Box>
+      </Card>
 
       {/* Pie (today) */}
       <Card sx={{ p: 3, mb: 4 }}>
         <Box display="flex" justifyContent="space-between" alignItems="center">
-          <Typography variant="h6" fontWeight={600}>Break Usage Summary (Today)</Typography>
-          <Select size="small" value={selectedEmp} onChange={(e) => setSelectedEmp(e.target.value)}>
+          <Typography variant="h6" fontWeight={600}>
+            Break Usage Summary (Today)
+          </Typography>
+          <Select
+            size="small"
+            value={selectedEmp}
+            onChange={(e) => setSelectedEmp(e.target.value)}
+          >
             <MenuItem value="all">All Employees</MenuItem>
             {employees.map((emp) => (
               <MenuItem key={emp.id || emp.emp_id || emp._id} value={emp.id || emp.emp_id || emp._id}>
@@ -472,7 +529,8 @@ export default function Dashboard() {
                   : (() => {
                       const emp = employees.find((e) => (e.id || e.emp_id || e._id) === selectedEmp);
                       const ses = (emp?.idle_sessions || []).filter((s) => ymdOf(s) === todayYmd);
-                      const agg = (c) => ses.reduce((a, s) => a + (s.category === c ? (s.duration || 0) : 0), 0);
+                      const agg = (c) =>
+                        ses.reduce((a, s) => a + (s.category === c ? (s.duration || 0) : 0), 0);
                       return [
                         { name: "General Break", value: agg("General") },
                         { name: "Namaz Break", value: agg("Namaz") },
@@ -499,7 +557,9 @@ export default function Dashboard() {
 
       {/* Bar (today) */}
       <Card sx={{ p: 3, mb: 4 }}>
-        <Typography variant="h6" fontWeight={600}>Employee Comparison (Today)</Typography>
+        <Typography variant="h6" fontWeight={600}>
+          Employee Comparison (Today)
+        </Typography>
         <Divider sx={{ my: 2 }} />
         <ResponsiveContainer width="100%" height={400}>
           <BarChart
@@ -535,16 +595,26 @@ export default function Dashboard() {
           Leaderboard — Obedience ({scope === "today" ? "Today" : `This Month (${daysInMonth} days)`})
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Sorted with most obedient at top. Colors: <b style={{ color: theme.palette.success.main }}>Green</b> = Obedient,{" "}
+          Sorted with most obedient at top.{" "}
+          <b style={{ color: theme.palette.success.main }}>Green</b> = Obedient,{" "}
           <b style={{ color: theme.palette.warning.main }}>Amber</b> = Near limit,{" "}
-          <b style={{ color: theme.palette.error.main }}>Red</b> = Exceeded.
+          <b style={{ color: theme.palette.error.main }}>Red</b> = Exceeded.{" "}
+          <span style={{ marginLeft: 8 }}>
+            <Flag sx={{ fontSize: 16, verticalAlign: "text-bottom", color: theme.palette.error.main }} /> = Exceeded
+            general (60m) or namaz (40m)
+          </span>
         </Typography>
         <Divider sx={{ mb: 2 }} />
 
         <Box sx={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
-              <tr style={{ background: C.tableHeadGrad, color: theme.palette.getContrastText(theme.palette.primary.main) }}>
+              <tr
+                style={{
+                  background: C.tableHeadGrad,
+                  color: theme.palette.getContrastText(theme.palette.primary.main),
+                }}
+              >
                 <th style={{ padding: 10, textAlign: "left" }}>#</th>
                 <th style={{ padding: 10, textAlign: "left" }}>Name</th>
                 <th style={{ padding: 10, textAlign: "left" }}>Dept</th>
@@ -560,38 +630,26 @@ export default function Dashboard() {
                 const bg = r.status === "Exceeded" ? C.badBg : r.status === "Near Limit" ? C.warnBg : C.okBg;
                 const capG = effectiveGeneralLimit;
                 const capN = effectiveNamazLimit;
-                const exceedG = capG ? r.general > capG : false;
-                const exceedN = capN ? r.namaz > capN : false;
-
-                const pctBar = (value, cap, baseColor, exceeded) => (
-                  <Box sx={{ minWidth: 160, display: "flex", alignItems: "center", gap: 1 }}>
-                    <Box sx={{ flex: 1 }}>
-                      <Tooltip title={`${value} / ${cap} min`}>
-                        <LinearProgress
-                          variant="determinate"
-                          value={cap ? Math.min(100, (value / cap) * 100) : 0}
-                          sx={{
-                            height: 8,
-                            borderRadius: 6,
-                            backgroundColor: C.progressTrack,
-                            "& .MuiLinearProgress-bar": {
-                              backgroundColor: exceeded ? theme.palette.error.main : baseColor,
-                            },
-                          }}
-                        />
-                      </Tooltip>
-                      <Typography
-                        variant="caption"
-                        sx={{ display: "block", mt: 0.5, fontWeight: 700, color: exceeded ? "error.main" : "text.secondary" }}
-                      >
-                        {value} m
-                      </Typography>
-                    </Box>
-                    {exceeded && <FlagRounded fontSize="small" sx={{ color: "error.main" }} />}
+                const pctBar = (value, cap, color, exceeded) => (
+                  <Box sx={{ minWidth: 160 }}>
+                    <Tooltip title={`${value} / ${cap} min`}>
+                      <LinearProgress
+                        variant="determinate"
+                        value={cap ? Math.min(100, (value / cap) * 100) : 0}
+                        sx={{
+                          height: 8,
+                          borderRadius: 6,
+                          backgroundColor: C.progressTrack,
+                          "& .MuiLinearProgress-bar": { backgroundColor: exceeded ? theme.palette.error.main : color },
+                        }}
+                      />
+                    </Tooltip>
+                    <Typography variant="caption" sx={{ display: "block", mt: 0.5 }}>
+                      {value} m {exceeded && <Flag sx={{ fontSize: 14, color: "error.main", ml: 0.5 }} />}
+                    </Typography>
                   </Box>
                 );
                 const medal = r.rank === 1 ? "🥇" : r.rank === 2 ? "🥈" : r.rank === 3 ? "🥉" : r.rank;
-
                 return (
                   <tr
                     key={r.id}
@@ -602,17 +660,22 @@ export default function Dashboard() {
                     }}
                   >
                     <td style={{ padding: 10, fontWeight: 700 }}>{medal}</td>
-                    <td style={{ padding: 10 }}>{r.name}</td>
+                    <td style={{ padding: 10 }}>
+                      {r.name} {(r.genExceeded || r.namExceeded) && <Flag sx={{ fontSize: 16, color: "error.main" }} />}
+                    </td>
                     <td style={{ padding: 10 }}>{r.department}</td>
-                    <td style={{ padding: 10, textAlign: "center" }}>{pctBar(r.general, capG, C.general, exceedG)}</td>
-                    <td style={{ padding: 10, textAlign: "center" }}>{pctBar(r.namaz, capN, C.namaz, exceedN)}</td>
+                    <td style={{ padding: 10, textAlign: "center" }}>
+                      {pctBar(r.general, capG, C.general, r.genExceeded)}
+                    </td>
+                    <td style={{ padding: 10, textAlign: "center" }}>
+                      {pctBar(r.namaz, capN, C.namaz, r.namExceeded)}
+                    </td>
                     <td style={{ padding: 10, fontWeight: 600, textAlign: "center" }}>{r.official} m</td>
                     <td style={{ padding: 10, fontWeight: 700, textAlign: "center" }}>{r.total} m</td>
                     <td style={{ padding: 10, textAlign: "center" }}>
                       <Chip
                         label={r.status}
                         color={r.color}
-                        icon={r.status === "Exceeded" ? <FlagRounded /> : undefined}
                         variant={r.status === "Obedient" ? "filled" : "outlined"}
                         sx={{ fontWeight: 700 }}
                       />
@@ -632,7 +695,10 @@ export default function Dashboard() {
           <List>
             {employees.map((emp) => (
               <ListItem key={emp.id || emp.emp_id || emp._id}>
-                <ListItemText primary={emp.name} secondary={`Dept: ${emp.department || "-"} | Status: ${emp.latest_status || "-"}`} />
+                <ListItemText
+                  primary={emp.name}
+                  secondary={`Dept: ${emp.department || "-"} | Status: ${emp.latest_status || "-"}`}
+                />
               </ListItem>
             ))}
           </List>
@@ -641,4 +707,5 @@ export default function Dashboard() {
     </Box>
   );
 }
+
 
