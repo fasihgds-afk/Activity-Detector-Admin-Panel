@@ -42,6 +42,7 @@ import {
   Close,
   Save,
   Flag,
+  Refresh,
 } from "@mui/icons-material";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -105,7 +106,13 @@ function currentShiftYmd() {
   const d = parts[2];
   const dt = new Date(Date.UTC(y, m - 1, d));
   dt.setUTCDate(dt.getUTCDate() - 1);
-  return dt.getUTCFullYear() + "-" + pad(dt.getUTCMonth() + 1) + "-" + pad(dt.getUTCDate());
+  return (
+    dt.getUTCFullYear() +
+    "-" +
+    pad(dt.getUTCMonth() + 1) +
+    "-" +
+    pad(dt.getUTCDate())
+  );
 }
 function monthBounds(ym /* "YYYY-MM" */) {
   const [y, m] = ym.split("-").map(Number);
@@ -134,6 +141,54 @@ function calcTotals(sessions) {
   }
   return t;
 }
+function groupByDaySums(sessions) {
+  // returns Map<YYYY-MM-DD, {general, namaz, official, autobreak, total}>
+  const map = new Map();
+  for (const s of sessions) {
+    const d =
+      s.shiftDate || ymdInAsiaFromISO(s.idle_start) || ymdInAsiaFromISO(s.idle_end);
+    if (!d) continue;
+    if (!map.has(d)) map.set(d, { total: 0, general: 0, namaz: 0, official: 0, autobreak: 0 });
+    const bucket = map.get(d);
+    const mins = Number(s.duration) || 0;
+    bucket.total += mins;
+    if (s.category === "General") bucket.general += mins;
+    else if (s.category === "Namaz") bucket.namaz += mins;
+    else if (s.category === "Official") bucket.official += mins;
+    else if (s.category === "AutoBreak") bucket.autobreak += mins;
+  }
+  return map;
+}
+function computeMonthlyExceedStats(sessions, month) {
+  const { from, to } = monthBounds(month);
+  const scoped = sessions.filter((s) =>
+    inPickedRange(s.shiftDate, "month", null, from, to, s.idle_start)
+  );
+  const byDay = groupByDaySums(scoped);
+  let daysExceededGeneral = 0;
+  let daysExceededNamaz = 0;
+  let overGeneral = 0;
+  let overNamaz = 0;
+  for (const [, sums] of byDay.entries()) {
+    if (sums.general > CAP_GENERAL_DAY) {
+      daysExceededGeneral += 1;
+      overGeneral += sums.general - CAP_GENERAL_DAY;
+    }
+    if (sums.namaz > CAP_NAMAZ_DAY) {
+      daysExceededNamaz += 1;
+      overNamaz += sums.namaz - CAP_NAMAZ_DAY;
+    }
+  }
+  const totals = calcTotals(scoped);
+  return {
+    totals,
+    daysExceededGeneral,
+    daysExceededNamaz,
+    overGeneral, // minutes
+    overNamaz, // minutes
+    activeDays: byDay.size,
+  };
+}
 
 function hmToMinutes(hhmm) {
   const parts = (hhmm || "").split(":").map(Number);
@@ -153,7 +208,7 @@ function isInShiftNow(shiftStart, shiftEnd) {
   const e = hmToMinutes(shiftEnd);
   if (s == null || e == null) return false;
   if (e >= s) return now >= s && now <= e;
-  return now >= s || now <= e; // crosses midnight (6 PM–3 AM, 9 PM–6 AM)
+  return now >= s || now <= e; // crosses midnight
 }
 function summarizeReasonsByCategory(sessions) {
   const ORDER = ["General", "Namaz", "Official", "AutoBreak"];
@@ -189,7 +244,7 @@ function isoFromKarachi(ymd /* YYYY-MM-DD */, hhmm /* HH:mm */) {
   const [Y, M, D] = ymd.split("-").map(Number);
   const [H, Min] = hhmm.split(":").map(Number);
   // Karachi is UTC+5 (no DST)
-  const dt = new Date(Date.UTC(Y, M - 1, D, H - 5, Min || 0, 0));
+  const dt = new Date(Date.UTC(Y, M - 1, D, (H ?? 0) - 5, Min || 0, 0));
   return dt.toISOString();
 }
 function addDaysYMD(ymd, days) {
@@ -279,7 +334,8 @@ function EmployeeRow({
   }
 
   const trackBorder = alpha(theme.palette.divider, 0.4);
-  const cardBase = (col, opLight = 0.12, opDark = 0.18) => alpha(col, theme.palette.mode === "dark" ? opDark : opLight);
+  const cardBase = (col, opLight = 0.12, opDark = 0.18) =>
+    alpha(col, theme.palette.mode === "dark" ? opDark : opLight);
 
   return (
     <>
@@ -311,7 +367,9 @@ function EmployeeRow({
         </TableCell>
         <TableCell align="center">
           <Tooltip title="Show Sessions">
-            <IconButton onClick={() => setOpen((x) => !x)}>{open ? <KeyboardArrowUp /> : <KeyboardArrowDown />}</IconButton>
+            <IconButton onClick={() => setOpen((x) => !x)}>
+              {open ? <KeyboardArrowUp /> : <KeyboardArrowDown />}
+            </IconButton>
           </Tooltip>
         </TableCell>
 
@@ -348,8 +406,10 @@ function EmployeeRow({
                 const namazBg = cardBase(theme.palette.success.main);
                 const generalBg = cardBase(theme.palette.warning.main);
 
-                const genExceeded = sums.general > (caps?.general ?? CAP_GENERAL_DAY);
-                const namExceeded = sums.namaz > (caps?.namaz ?? CAP_NAMAZ_DAY);
+                const genCap = caps?.general ?? CAP_GENERAL_DAY;
+                const namCap = caps?.namaz ?? CAP_NAMAZ_DAY;
+                const genExceededBy = Math.max(0, sums.general - genCap);
+                const namExceededBy = Math.max(0, sums.namaz - namCap);
 
                 return (
                   <Card
@@ -423,7 +483,9 @@ function EmployeeRow({
                                   {s.reason || (isAuto ? "System Power Off / Startup" : "-")}
                                 </TableCell>
                                 <TableCell>
-                                  {isAuto ? Number(s.duration || 0).toFixed(1) + " min" : (s.duration || 0) + " min"}
+                                  {isAuto
+                                    ? Number(s.duration || 0).toFixed(1) + " min"
+                                    : (s.duration || 0) + " min"}
                                 </TableCell>
 
                                 {canManageLogs && !isAuto && (
@@ -492,18 +554,24 @@ function EmployeeRow({
                                 borderRadius: 3,
                                 bgcolor: namazBg,
                                 border: "1px solid",
-                                borderColor: namExceeded ? "error.main" : trackBorder,
+                                borderColor: namExceededBy ? "error.main" : trackBorder,
                               }}
                             >
-                              <Typography fontWeight={700} color={namExceeded ? "error.main" : "success.main"}>
-                                Namaz Break Time {namExceeded && <Flag sx={{ fontSize: 18, ml: 0.5 }} />}
+                              <Typography
+                                fontWeight={700}
+                                color={namExceededBy ? "error.main" : "success.main"}
+                                display="flex"
+                                alignItems="center"
+                                gap={0.5}
+                              >
+                                Namaz Break Time {namExceededBy > 0 && <Flag sx={{ fontSize: 18 }} />}
                               </Typography>
                               <Typography variant="h6" fontWeight={800}>
                                 {sums.namaz} min
                               </Typography>
-                              {namExceeded && (
+                              {namExceededBy > 0 && (
                                 <Typography variant="caption" color="error.main">
-                                  Exceeded 40 min
+                                  Exceeded by {namExceededBy} min
                                 </Typography>
                               )}
                             </Card>
@@ -515,18 +583,24 @@ function EmployeeRow({
                                 borderRadius: 3,
                                 bgcolor: generalBg,
                                 border: "1px solid",
-                                borderColor: genExceeded ? "error.main" : trackBorder,
+                                borderColor: genExceededBy ? "error.main" : trackBorder,
                               }}
                             >
-                              <Typography fontWeight={700} color={genExceeded ? "error.main" : "warning.main"}>
-                                General Break Time {genExceeded && <Flag sx={{ fontSize: 18, ml: 0.5 }} />}
+                              <Typography
+                                fontWeight={700}
+                                color={genExceededBy ? "error.main" : "warning.main"}
+                                display="flex"
+                                alignItems="center"
+                                gap={0.5}
+                              >
+                                General Break Time {genExceededBy > 0 && <Flag sx={{ fontSize: 18 }} />}
                               </Typography>
                               <Typography variant="h6" fontWeight={800}>
                                 {sums.general} min
                               </Typography>
-                              {genExceeded && (
+                              {genExceededBy > 0 && (
                                 <Typography variant="caption" color="error.main">
-                                  Exceeded 60 min
+                                  Exceeded by {genExceededBy} min
                                 </Typography>
                               )}
                             </Card>
@@ -551,7 +625,7 @@ export default function Employees() {
   const isEmployee = role === "employee";
   const isSuper = role === "superadmin";
   const canDownload = role === "admin" || role === "superadmin";
-  const canManageLogs = role === "superadmin"; // admin cannot CRUD (per your request)
+  const canManageLogs = role === "superadmin"; // admin cannot CRUD
 
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState([]);
@@ -566,7 +640,7 @@ export default function Employees() {
 
   const [employeeFilter, setEmployeeFilter] = useState("all");
 
-  const [mode, setMode] = useState("day");
+  const [mode, setMode] = useState("day"); // only "day" and "month"
   const [day, setDay] = useState(currentShiftYmd());
   const [month, setMonth] = useState(() => {
     const parts = currentShiftYmd().split("-");
@@ -605,19 +679,10 @@ export default function Employees() {
     if (isEmployee) setEmployeeFilter(getSelfEmpId() || "all");
   }, [isEmployee]);
 
-  useEffect(() => {
-    const t = setInterval(() => {
-      if (mode !== "day") return;
-      const sd = currentShiftYmd();
-      setDay((d0) => (d0 !== sd ? sd : d0));
-    }, 60000);
-    return () => clearInterval(t);
-  }, [mode]);
-
+  // NOTE: removed minute tick + polling. Manual refresh or parameter change only.
   const filtered = useMemo(() => {
     let list = Array.isArray(employees) ? employees : [];
     if (isEmployee) {
-      // hard lock to self
       list = list.filter(
         (e) => e.emp_id === getSelfEmpId() || e.id === getSelfEmpId() || e._id === getSelfEmpId()
       );
@@ -645,11 +710,9 @@ export default function Employees() {
       let params;
       if (mode === "day") {
         params = { from: day, to: day };
-      } else if (mode === "month") {
+      } else {
         const { from: f, to: t } = monthBounds(month);
         params = { from: f, to: t };
-      } else {
-        params = { from, to };
       }
       params.limit = DEFAULT_LIMIT;
 
@@ -662,7 +725,7 @@ export default function Employees() {
       setConfig((c) => ({
         ...c,
         generalIdleLimit: gl ?? CAP_GENERAL_DAY,
-        namazLimit: CAP_NAMAZ_DAY, // force 40m as requested
+        namazLimit: CAP_NAMAZ_DAY, // fixed 40m
         categoryColors:
           payload?.categoryColors ||
           c.categoryColors || { Official: "#3b82f6", General: "#f59e0b", Namaz: "#10b981", AutoBreak: "#ef4444" },
@@ -687,14 +750,14 @@ export default function Employees() {
     }
   };
 
+  // Initial load + reload on mode/day/month change
   useEffect(() => {
     fetchEmployees();
-    const id = setInterval(fetchEmployees, 60000);
+    // no polling here
     return () => {
-      clearInterval(id);
       if (abortRef.current) abortRef.current.abort();
     };
-  }, [mode, day, month, from, to]);
+  }, [mode, day, month]);
 
   const isSingleSelected = filtered.length === 1;
   const selectedName = isSingleSelected ? cleanName(filtered[0] && filtered[0].name) : "";
@@ -703,19 +766,17 @@ export default function Employees() {
       ? isSingleSelected
         ? "Daily — " + selectedName
         : "Daily — All Employees"
-      : mode === "month"
-      ? isSingleSelected
-        ? "Monthly — " + selectedName
-        : "Monthly — All Employees"
       : isSingleSelected
-      ? "Range — " + selectedName
-      : "Range — All Employees";
+      ? "Monthly — " + selectedName
+      : "Monthly — All Employees";
 
   function confirmDownload(label) {
     return window.confirm("Download " + label + "?");
   }
   function inScopeSessions(emp) {
-    return (emp.idle_sessions || []).filter((s) => inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start));
+    return (emp.idle_sessions || []).filter((s) =>
+      inPickedRange(s.shiftDate, mode, day, from, to, s.idle_start)
+    );
   }
   function uniqueDays(sessions) {
     const set = new Set();
@@ -728,29 +789,15 @@ export default function Employees() {
   function toH1(min) {
     return ((min || 0) / 60).toFixed(1);
   }
-  function getMonthDays() {
-    if (mode !== "month") return 1;
-    const parts = month.split("-").map(Number);
-    const yy = parts[0];
-    const mm = parts[1];
-    return new Date(yy, mm, 0).getDate();
-  }
-  function effectiveGeneralLimit(daysOverride) {
-    const daily = config.generalIdleLimit ?? CAP_GENERAL_DAY;
-    const mult = mode === "month" ? (daysOverride == null ? getMonthDays() : daysOverride) : 1;
-    return daily * mult;
-  }
-  function effectiveNamazLimit(daysOverride) {
-    const daily = config.namazLimit ?? CAP_NAMAZ_DAY;
-    const mult = mode === "month" ? (daysOverride == null ? getMonthDays() : daysOverride) : 1;
-    return daily * mult;
-  }
+
   function collectReportRowsWithReasons() {
     const rows = [];
     const elist = filtered.length ? filtered : [];
     for (const emp of elist) {
       const sessions = inScopeSessions(emp);
       const sums = calcTotals(sessions);
+      const genExceededBy = Math.max(0, sums.general - (config.generalIdleLimit ?? CAP_GENERAL_DAY));
+      const namExceededBy = Math.max(0, sums.namaz - (config.namazLimit ?? CAP_NAMAZ_DAY));
       rows.push([
         emp.emp_id || emp.id || emp._id,
         emp.name || "-",
@@ -760,29 +807,23 @@ export default function Employees() {
         sums.namaz,
         sums.official,
         Number(sums.autobreak).toFixed(1),
+        genExceededBy > 0 ? `YES (+${genExceededBy}m)` : "NO",
+        namExceededBy > 0 ? `YES (+${namExceededBy}m)` : "NO",
         summarizeReasonsByCategory(sessions),
       ]);
     }
     return rows;
   }
 
-  /* ===== PDF / Excel exporters ===== */
+  /* ===== PDF exporters ===== */
   function downloadPDFDailySummaryAll() {
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
     const pageW = doc.internal.pageSize.getWidth();
     const brand = [31, 41, 55];
     const accent = [99, 102, 241];
-    const label = mode === "day" ? day : from + " → " + to;
-    const title =
-      mode === "day" ? "Daily Idle Report" : mode === "month" ? "Monthly Idle Report" : "Custom Range Idle Report";
+    const title = "Daily Idle Report";
     const gDaily = config.generalIdleLimit ?? CAP_GENERAL_DAY;
     const nDaily = config.namazLimit ?? CAP_NAMAZ_DAY;
-    const gCap = effectiveGeneralLimit();
-    const nCap = effectiveNamazLimit();
-    const limitsText =
-      mode === "month"
-        ? `Limits: General ${gDaily}m/day (cap ${gCap}m), Namaz ${nDaily}m/day (cap ${nCap}m)`
-        : `Limits: General ${gDaily}m/day, Namaz ${nDaily}m/day`;
 
     const header = () => {
       doc.setFillColor(brand[0], brand[1], brand[2]);
@@ -795,7 +836,9 @@ export default function Employees() {
       doc.setFontSize(12);
       doc.text(title, 40, 46);
       doc.setFontSize(10);
-      doc.text("Range: " + label + " | TZ: " + ZONE + " | " + limitsText, pageW - 40, 26, { align: "right" });
+      doc.text(`Range: ${day} | TZ: ${ZONE} | Limits: General ${gDaily}m/day, Namaz ${nDaily}m/day`, pageW - 40, 26, {
+        align: "right",
+      });
     };
 
     const body = collectReportRowsWithReasons();
@@ -808,6 +851,8 @@ export default function Employees() {
       "Namaz (m)",
       "Official (m)",
       "Auto (m)",
+      "General Exceeded",
+      "Namaz Exceeded",
       "Reasons (by Category)",
     ];
 
@@ -835,13 +880,14 @@ export default function Employees() {
         5: { cellWidth: 60 },
         6: { cellWidth: 60 },
         7: { cellWidth: 60 },
-        8: { cellWidth: "auto", overflow: "linebreak", minCellWidth: 220 },
+        8: { cellWidth: 90 },
+        9: { cellWidth: 90 },
+        10: { cellWidth: "auto", overflow: "linebreak", minCellWidth: 200 },
       },
       didDrawPage: () => header(),
     });
 
-    const fileLabel = mode === "day" ? day : from.split("-").join("") + "_" + to.split("-").join("");
-    doc.save("employee_idle_report_" + fileLabel + ".pdf");
+    doc.save("employee_idle_report_" + day + ".pdf");
   }
 
   function downloadPDFDailyDetailSelected() {
@@ -852,6 +898,8 @@ export default function Employees() {
       (a, b) => new Date(a.idle_start || 0) - new Date(b.idle_start || 0)
     );
     const sums = calcTotals(sessions);
+    const genExceededBy = Math.max(0, sums.general - (config.generalIdleLimit ?? CAP_GENERAL_DAY));
+    const namExceededBy = Math.max(0, sums.namaz - (config.namazLimit ?? CAP_NAMAZ_DAY));
 
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
     const pageW = doc.internal.pageSize.getWidth();
@@ -881,7 +929,7 @@ export default function Employees() {
     );
 
     doc.setFillColor(brand[0], brand[1], brand[2]);
-    doc.roundedRect(40, 84, 340, 26, 6, 6, "F");
+    doc.roundedRect(40, 84, 520, 26, 6, 6, "F");
     doc.setFont("helvetica", "bold");
     doc.setFontSize(12);
     doc.setTextColor("#fff");
@@ -908,14 +956,22 @@ export default function Employees() {
     });
 
     const y = (doc.lastAutoTable?.finalY || 120) + 18;
-    const boxW = 190;
-    const boxH = 68;
+    const boxW = 220;
+    const boxH = 78;
     const gap = 16;
     const blocks = [
       ["Total Time", Number(sums.total).toFixed(1) + " min", [234, 179, 8]],
       ["Official Break Time", sums.official + " min", [59, 130, 246]],
-      ["Namaz Break Time", sums.namaz + " min", [16, 185, 129]],
-      ["General Break Time", sums.general + " min", [107, 114, 128]],
+      [
+        "Namaz Break Time" + (namExceededBy ? ` (+${namExceededBy}m over)` : ""),
+        sums.namaz + " min",
+        namExceededBy ? [220, 38, 38] : [16, 185, 129],
+      ],
+      [
+        "General Break Time" + (genExceededBy ? ` (+${genExceededBy}m over)` : ""),
+        sums.general + " min",
+        genExceededBy ? [220, 38, 38] : [107, 114, 128],
+      ],
     ];
     blocks.forEach((b, i) => {
       const x = 40 + i * (boxW + gap);
@@ -928,7 +984,7 @@ export default function Employees() {
       doc.text(b[0], x + 12, y + 22);
       doc.setFontSize(16);
       doc.setTextColor(17, 24, 39);
-      doc.text(b[1], x + 12, y + 46);
+      doc.text(b[1], x + 12, y + 48);
     });
 
     doc.save("daily_" + slugName(empName) + "_" + day + ".pdf");
@@ -936,8 +992,7 @@ export default function Employees() {
 
   function downloadPDFMonthlyTotals(allOrSelected = "all") {
     if (mode !== "month") return;
-    const list =
-      allOrSelected === "all" ? filtered : isSingleSelected ? filtered.slice(0, 1) : [];
+    const list = allOrSelected === "all" ? filtered : isSingleSelected ? filtered.slice(0, 1) : [];
     if (!list.length) return;
 
     const doc = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
@@ -960,16 +1015,9 @@ export default function Employees() {
       doc.setFont("helvetica", "normal");
       doc.setFontSize(11);
       doc.text(
-        "Range: " +
-          mf +
-          " → " +
-          mt +
-          " | Caps/day: General " +
-          (config.generalIdleLimit ?? CAP_GENERAL_DAY) +
-          "m, Namaz " +
-          (config.namazLimit ?? CAP_NAMAZ_DAY) +
-          "m | TZ: " +
-          ZONE,
+        `Range: ${mf} → ${mt} | Caps/day: General ${config.generalIdleLimit ?? CAP_GENERAL_DAY}m, Namaz ${
+          config.namazLimit ?? CAP_NAMAZ_DAY
+        }m | TZ: ${ZONE}`,
         40,
         46
       );
@@ -979,32 +1027,21 @@ export default function Employees() {
 
     const rows = [];
     for (const emp of list) {
-      const sessions = inScopeSessions(emp);
-      const sums = calcTotals(sessions);
-      const days =
-        uniqueDays(sessions).size ||
-        new Date(parseInt(month.slice(0, 4), 10), parseInt(month.slice(5), 10), 0).getDate();
-      const shiftSpan = (() => {
-        const s = hmToMinutes(emp.shift_start);
-        const e = hmToMinutes(emp.shift_end);
-        if (s == null || e == null) return 9 * 60;
-        return e >= s ? e - s : 24 * 60 - s + e;
-      })();
-      const workMin = Math.max(0, shiftSpan * days - sums.total);
-      const gCap = effectiveGeneralLimit(days);
-      const nCap = effectiveNamazLimit(days);
+      const sessions = emp.idle_sessions || [];
+      const stats = computeMonthlyExceedStats(sessions, month);
       rows.push([
         emp.emp_id || emp.id || emp._id,
         emp.name || "-",
         emp.department || "-",
-        toH1(workMin),
-        toH1(sums.general),
-        toH1(sums.namaz),
-        toH1(sums.official),
-        toH1(sums.autobreak),
-        sums.general > gCap ? "+" + toH1(sums.general - gCap) + "h" : "-",
-        sums.namaz > nCap ? "+" + toH1(sums.namaz - nCap) + "h" : "-",
-        days,
+        toH1(stats.totals.general), // Total General (h)
+        toH1(stats.totals.namaz), // Total Namaz (h)
+        toH1(stats.totals.official), // Official (h)
+        toH1(stats.totals.autobreak), // Auto (h)
+        stats.daysExceededGeneral, // days exceeded General
+        (stats.overGeneral || 0) + "m (" + toH1(stats.overGeneral) + "h)", // over General minutes + hours
+        stats.daysExceededNamaz, // days exceeded Namaz
+        (stats.overNamaz || 0) + "m (" + toH1(stats.overNamaz) + "h)", // over Namaz minutes + hours
+        stats.activeDays,
       ]);
     }
 
@@ -1012,13 +1049,14 @@ export default function Employees() {
       "Emp ID",
       "Name",
       "Dept",
-      "Working (h)",
       "General (h)",
       "Namaz (h)",
       "Official (h)",
       "Auto (h)",
-      "Gen Exceed",
-      "Namaz Exceed",
+      "Days > General Cap",
+      "Over-General",
+      "Days > Namaz Cap",
+      "Over-Namaz",
       "Active Days",
     ];
 
@@ -1045,69 +1083,12 @@ export default function Employees() {
     doc.save(fname);
   }
 
-  function downloadXls(filename, headers, rows) {
-    const headerHtml = headers
-      .map(
-        (h) =>
-          '<th style="background:#1f2937;color:#fff;padding:10px 8px;border:1px solid #e5e7eb;text-align:center;font-weight:700">' +
-          h +
-          "</th>"
-      )
-      .join("");
-    const rowHtml = rows
-      .map((r) => {
-        const cells = r
-          .map((c, i) => {
-            const base = "padding:8px;border:1px solid #e5e7eb;text-align:center;vertical-align:middle";
-            const wrap = /reason/i.test(headers[i]) ? "white-space:normal;max-width:520px" : "white-space:nowrap";
-            return '<td style="' + base + ";" + wrap + '">' + String(c == null ? "" : c) + "</td>";
-          })
-          .join("");
-        return "<tr>" + cells + "</tr>";
-      })
-      .join("");
-    const html =
-      "<html><head><meta charset=\"utf-8\" />" +
-      "<style>table{border-collapse:collapse;font-family:Segoe UI,Arial;font-size:12px} thead tr th{position:sticky;top:0} td,th{word-break:break-word}</style>" +
-      "</head><body><table><thead><tr>" +
-      headerHtml +
-      "</tr></thead><tbody>" +
-      rowHtml +
-      "</tbody></table></body></html>";
-    const blob = new Blob([html], { type: "application/vnd.ms-excel" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = filename.slice(-4) === ".xls" ? filename : filename + ".xls";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  }
-
-  function downloadXLS() {
-    const headers = [
-      "Employee ID",
-      "Name",
-      "Department",
-      "Total Idle (min)",
-      "General (min)",
-      "Namaz (min)",
-      "Official (min)",
-      "AutoBreak (min)",
-      "Reasons (by Category)",
-    ];
-    const rows = collectReportRowsWithReasons();
-    const label = mode === "day" ? day : from + "_to_" + to;
-    downloadXls("employee_idle_report_" + label + ".xls", headers, rows);
-  }
-
   function handleQuickDownload() {
     if (mode === "day") {
       return isSingleSelected ? downloadPDFDailyDetailSelected() : downloadPDFDailySummaryAll();
     }
-    if (mode === "month") {
-      return isSingleSelected ? downloadPDFMonthlyTotals("one") : downloadPDFMonthlyTotals("all");
-    }
-    return downloadPDFDailySummaryAll();
+    // month
+    return isSingleSelected ? downloadPDFMonthlyTotals("one") : downloadPDFMonthlyTotals("all");
   }
 
   /* ===== employee edit/delete (superadmin) ===== */
@@ -1161,10 +1142,12 @@ export default function Employees() {
 
   /* ===== log edit/delete (superadmin only) ===== */
   function onEditLog(s, emp) {
+    // include shiftDate for backend clarity
+    const dateYmd = s.shiftDate || ymdInAsiaFromISO(s.idle_start) || day;
     setLogForm({
-      _id: s._id,
+      _id: s._id || s.id, // be tolerant
       who: emp?.name || "",
-      dateYmd: s.shiftDate || ymdInAsiaFromISO(s.idle_start) || day,
+      dateYmd,
       startHM: (s.start_time_local || "").slice(0, 5),
       endHM: s.end_time_local && s.end_time_local !== "Ongoing" ? s.end_time_local.slice(0, 5) : "",
       reason: s.reason || "",
@@ -1174,7 +1157,7 @@ export default function Employees() {
     setLogEditOpen(true);
   }
   function onDeleteLog(s /*, emp*/) {
-    setLogForm((f) => ({ ...f, _id: s._id }));
+    setLogForm((f) => ({ ...f, _id: s._id || s.id }));
     setLogDeleteOpen(true);
   }
 
@@ -1185,6 +1168,7 @@ export default function Employees() {
         reason: logForm.reason,
         category: logForm.category,
         status: logForm.status,
+        shiftDate: logForm.dateYmd, // helps some backends
       };
 
       const { startIso, endIso } = composeUtcPeriod(logForm.dateYmd, logForm.startHM, logForm.endHM);
@@ -1268,7 +1252,6 @@ export default function Employees() {
         <Select size="small" value={mode} onChange={(e) => setMode(e.target.value)}>
           <MenuItem value="day">DAILY</MenuItem>
           <MenuItem value="month">MONTHLY</MenuItem>
-          <MenuItem value="range">CUSTOM RANGE</MenuItem>
         </Select>
         {mode === "day" && (
           <TextField
@@ -1290,27 +1273,15 @@ export default function Employees() {
             InputLabelProps={{ shrink: true }}
           />
         )}
-        {mode === "range" && (
-          <>
-            <TextField
-              label="From"
-              type="date"
-              size="small"
-              value={from}
-              onChange={(e) => setFrom(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-            />
-            <TextField
-              label="To"
-              type="date"
-              size="small"
-              value={to}
-              onChange={(e) => setTo(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-            />
-          </>
-        )}
         <Box flex={1} />
+        <Button
+          variant="outlined"
+          startIcon={<Refresh />}
+          onClick={fetchEmployees}
+          sx={{ mr: canDownload ? 1 : 0 }}
+        >
+          Refresh
+        </Button>
         {canDownload && (
           <>
             <Button
@@ -1324,7 +1295,7 @@ export default function Employees() {
               <MenuItem
                 onClick={() => {
                   setAnchorEl(null);
-                  if (confirmDownload(quickLabel)) handleQuickDownload();
+                  if (confirmDownload("Quick — " + quickLabel)) handleQuickDownload();
                 }}
               >
                 {"Quick — " + quickLabel}
@@ -1332,47 +1303,29 @@ export default function Employees() {
               <MenuItem
                 onClick={() => {
                   setAnchorEl(null);
-                  if (confirmDownload("Daily — All Employees")) downloadPDFDailySummaryAll();
+                  if (mode === "day") {
+                    if (confirmDownload("Daily — All Employees")) downloadPDFDailySummaryAll();
+                  } else {
+                    if (confirmDownload("Monthly — All Employees")) downloadPDFMonthlyTotals("all");
+                  }
                 }}
               >
-                Daily — All Employees
+                {mode === "day" ? "Daily — All Employees" : "Monthly — All Employees"}
               </MenuItem>
               <MenuItem
-                disabled={!(mode === "day" && isSingleSelected)}
+                disabled={!isSingleSelected}
                 onClick={() => {
                   setAnchorEl(null);
-                  if (confirmDownload("Daily — " + (selectedName || "Selected Employee")))
-                    downloadPDFDailyDetailSelected();
+                  if (mode === "day") {
+                    if (confirmDownload("Daily — " + (selectedName || "Selected Employee")))
+                      downloadPDFDailyDetailSelected();
+                  } else {
+                    if (confirmDownload("Monthly — " + (selectedName || "Selected Employee")))
+                      downloadPDFMonthlyTotals("one");
+                  }
                 }}
               >
-                {"Daily — " + (selectedName || "Selected Employee")}
-              </MenuItem>
-              <MenuItem
-                disabled={mode !== "month"}
-                onClick={() => {
-                  setAnchorEl(null);
-                  if (confirmDownload("Monthly — All Employees")) downloadPDFMonthlyTotals("all");
-                }}
-              >
-                Monthly — All Employees
-              </MenuItem>
-              <MenuItem
-                disabled={!(mode === "month" && isSingleSelected)}
-                onClick={() => {
-                  setAnchorEl(null);
-                  if (confirmDownload("Monthly — " + (selectedName || "Selected Employee")))
-                    downloadPDFMonthlyTotals("one");
-                }}
-              >
-                {"Monthly — " + (selectedName || "Selected Employee")}
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  setAnchorEl(null);
-                  if (confirmDownload("Excel — Summary")) downloadXLS();
-                }}
-              >
-                Excel — Summary (with Reasons)
+                {mode === "day" ? `Daily — ${selectedName || "Selected Employee"}` : `Monthly — ${selectedName || "Selected Employee"}`}
               </MenuItem>
             </Menu>
           </>
@@ -1380,7 +1333,7 @@ export default function Employees() {
       </Box>
 
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
-        {mode === "day" ? "Range: " + day : "Range: " + from + " → " + to} &nbsp; | &nbsp;
+        {mode === "day" ? "Range: " + day : (() => { const r = monthBounds(month); return "Range: " + r.from + " → " + r.to; })()} &nbsp; | &nbsp;
         {isEmployee
           ? "Employee: You"
           : employeeFilter !== "all"
@@ -1423,8 +1376,8 @@ export default function Employees() {
                     emp={emp}
                     dayMode={mode}
                     pickedDay={day}
-                    from={from}
-                    to={to}
+                    from={monthBounds(month).from}
+                    to={monthBounds(month).to}
                     categoryColors={config.categoryColors}
                     defaultOpen={filtered.length === 1}
                     showActions={isSuper}
@@ -1461,15 +1414,19 @@ export default function Employees() {
           <Box display="flex" gap={2} mt={1}>
             <TextField
               label="Shift Start (HH:mm)"
+              type="time"
               fullWidth
               value={editForm.shift_start}
               onChange={(e) => setEditForm((f) => ({ ...f, shift_start: e.target.value }))}
+              InputLabelProps={{ shrink: true }}
             />
             <TextField
               label="Shift End (HH:mm)"
+              type="time"
               fullWidth
               value={editForm.shift_end}
               onChange={(e) => setEditForm((f) => ({ ...f, shift_end: e.target.value }))}
+              InputLabelProps={{ shrink: true }}
             />
           </Box>
         </DialogContent>
@@ -1599,7 +1556,3 @@ export default function Employees() {
     </Box>
   );
 }
-
-
-
-
