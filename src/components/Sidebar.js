@@ -20,27 +20,29 @@ import { getRole } from "../auth";
 
 export default function Sidebar({ open, setOpen }) {
   const location = useLocation();
+
   const toggleSidebar = () => setOpen(!open);
 
-  // Role gate: admin or super admin
+  // Normalize role so: "super_admin", "Super Admin", "super admin" -> "superadmin"
   const normalizedRole = (getRole() || "")
     .toString()
     .toLowerCase()
-    .replace(/\s|_/g, ""); // "super_admin" / "Super Admin" -> "superadmin"
+    .replace(/\s|_/g, "");
   const canViewAttendance =
     normalizedRole === "admin" || normalizedRole === "superadmin";
 
+  // Base items
   const menuItems = [
     { text: "Dashboard", icon: <DashboardIcon />, path: "/" },
     { text: "Employees", icon: <PeopleIcon />, path: "/employees" },
     { text: "Reports", icon: <BarChartIcon />, path: "/reports" },
   ];
 
-  // Insert "View Attendance" right after "Reports" when allowed
+  // Build final items list with View Attendance under Reports for admin/super
   const finalItems = [...menuItems];
   if (canViewAttendance) {
-    const idx = finalItems.findIndex((i) => i.text === "Reports");
-    const insertAt = idx === -1 ? finalItems.length : idx + 1;
+    const reportsIdx = finalItems.findIndex((i) => i.text === "Reports");
+    const insertAt = reportsIdx === -1 ? finalItems.length : reportsIdx + 1;
     finalItems.splice(insertAt, 0, {
       text: "View Attendance",
       icon: <BarChartIcon />,
@@ -80,14 +82,17 @@ export default function Sidebar({ open, setOpen }) {
           const isExternal = !!item.external;
           const selected = !isExternal && location.pathname === item.path;
 
+          // Open external link in SAME TAB (no target/rel)
           const buttonProps = isExternal
             ? {
                 component: "a",
                 href: item.href,
-                target: "_blank",
-                rel: "noopener noreferrer",
               }
-            : { component: Link, to: item.path, selected };
+            : {
+                component: Link,
+                to: item.path,
+                selected,
+              };
 
           return (
             <Tooltip
@@ -122,3 +127,4 @@ export default function Sidebar({ open, setOpen }) {
     </Drawer>
   );
 }
+
