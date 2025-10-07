@@ -638,65 +638,70 @@ export default function Employees() {
     categoryColors: { Official: "#3b82f6", General: "#f59e0b", Namaz: "#10b981", AutoBreak: "#ef4444" },
   });
 
-  const [employeeFilter, setEmployeeFilter] = useState("all");
+ <TableBody>
+  {sessions.map((s, i) => {
+    const isAuto = s.kind === "AutoBreak" || s.category === "AutoBreak";
+    return (
+      <TableRow key={String(i)}>
+        <TableCell>
+          <Chip
+            label={s.category || (isAuto ? "AutoBreak" : "Uncategorized")}
+            size="small"
+            sx={{
+              fontWeight: 600,
+              color: "#fff",
+              bgcolor:
+                (s.category && categoryColors && categoryColors[s.category]) ||
+                (s.category === "Official"
+                  ? "info.main"
+                  : s.category === "General"
+                  ? "warning.main"
+                  : s.category === "Namaz"
+                  ? "success.main"
+                  : isAuto
+                  ? "error.main"
+                  : "grey.600"),
+            }}
+          />
+        </TableCell>
+        <TableCell>{s.start_time_local || "-"}</TableCell>
+        <TableCell>{s.end_time_local || "Ongoing"}</TableCell>
+        <TableCell
+          sx={{
+            whiteSpace: "normal",
+            overflowWrap: "anywhere",
+            wordBreak: "break-word",
+            maxWidth: 520,
+            lineHeight: 1.35,
+            py: 1,
+          }}
+        >
+          {s.reason || "-"}
+        </TableCell>
+        <TableCell>
+          {isAuto
+            ? Number(s.duration || 0).toFixed(1) + " min"
+            : (s.duration || 0) + " min"}
+        </TableCell>
 
-  const [mode, setMode] = useState("day"); // only "day" and "month"
-  const [day, setDay] = useState(currentShiftYmd());
-  const [month, setMonth] = useState(() => {
-    const parts = currentShiftYmd().split("-");
-    return parts[0] + "-" + parts[1];
-  });
-  const [from, setFrom] = useState(currentShiftYmd());
-  const [to, setTo] = useState(currentShiftYmd());
-
-  const [anchorEl, setAnchorEl] = useState(null);
-  const openMenu = Boolean(anchorEl);
-
-  // employee edit/delete (superadmin only)
-  const [editOpen, setEditOpen] = useState(false);
-  const [editEmp, setEditEmp] = useState(null);
-  const [editForm, setEditForm] = useState({ name: "", department: "", shift_start: "", shift_end: "" });
-  const [deleteOpen, setDeleteOpen] = useState(false);
-
-  // log edit/delete (superadmin only)
-  const [logEditOpen, setLogEditOpen] = useState(false);
-  const [logForm, setLogForm] = useState({
-    _id: "",
-    who: "",
-    dateYmd: "",
-    startHM: "",
-    endHM: "",
-    reason: "",
-    category: "General",
-    status: "Idle",
-  });
-  const [logDeleteOpen, setLogDeleteOpen] = useState(false);
-
-  const [busyAction, setBusyAction] = useState(false);
-  const abortRef = useRef(null);
-
-  useEffect(() => {
-    if (isEmployee) setEmployeeFilter(getSelfEmpId() || "all");
-  }, [isEmployee]);
-
-  // NOTE: removed minute tick + polling. Manual refresh or parameter change only.
-  const filtered = useMemo(() => {
-    let list = Array.isArray(employees) ? employees : [];
-    if (isEmployee) {
-      list = list.filter(
-        (e) => e.emp_id === getSelfEmpId() || e.id === getSelfEmpId() || e._id === getSelfEmpId()
-      );
-    } else if (employeeFilter !== "all") {
-      list = list.filter(
-        (e) => e.emp_id === employeeFilter || e.id === employeeFilter || e._id === employeeFilter
-      );
-    }
-    if (search.trim()) {
-      const s = search.toLowerCase();
-      list = list.filter((e) => e.name && e.name.toLowerCase().includes(s));
-    }
-    return list;
-  }, [employees, employeeFilter, search, isEmployee]);
+        {canManageLogs && !isAuto && (
+          <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
+            <Tooltip title="Edit log">
+              <IconButton size="small" onClick={() => onEditLog(s, emp)}>
+                <EditOutlined fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Delete log">
+              <IconButton size="small" color="error" onClick={() => onDeleteLog(s, emp)}>
+                <DeleteOutline fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </TableCell>
+        )}
+      </TableRow>
+    );
+  })}
+</TableBody>
 
   const fetchEmployees = async () => {
     try {
