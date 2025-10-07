@@ -480,7 +480,7 @@ function EmployeeRow({
                                     py: 1,
                                   }}
                                 >
-                                  {s.reason || (isAuto ? "System Power Off / Startup" : "-")}
+                                    {s.reason || "-"}
                                 </TableCell>
                                 <TableCell>
                                   {isAuto
